@@ -1,0 +1,11 @@
+# Build output
+/bin/
+/dist/
+*.test
+*.out
+coverage.txt
+
+# Editor
+.idea/
+.vscode/
+.DS_Store
