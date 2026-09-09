@@ -134,7 +134,18 @@ func newFiber(parent *Context, rt *runtime, cfg any, inject map[string]struct{})
 
 	// The parent owns the child's lifetime: disposing the parent disposes every
 	// plugin loaded beneath it.
-	fiber.parentDisposer = parent.fiber.onDispose(fiber.Dispose)
+	// Register the child's disposal on the parent, then publish the handle under
+	// the fiber lock: a concurrent parent unload can dispose this fiber before
+	// the assignment lands, and the handle must not be lost.
+	release := parent.fiber.onDispose(fiber.Dispose)
+	fiber.mu.Lock()
+	if fiber.disposed {
+		fiber.mu.Unlock()
+		release()
+	} else {
+		fiber.parentDisposer = release
+		fiber.mu.Unlock()
+	}
 	parent.shared.addFiber(rt, fiber)
 	parent.shared.bus.emitInternal("internal/plugin", &PluginEvent{Fiber: fiber})
 	fiber.refresh()
@@ -457,6 +468,11 @@ func (f *Fiber) run(config any) (err error) {
 }
 
 func (f *Fiber) fail(err error) {
+	// A failed load must not leak the effects it managed to register before
+	// failing, nor keep a service name it already provided occupied. Cordis does
+	// the same: _reload sets epoch=INACTIVE on error, which drives _unload.
+	f.unload()
+
 	f.mu.Lock()
 	f.err = err
 	f.mu.Unlock()
@@ -548,9 +564,12 @@ func (f *Fiber) Dispose() {
 
 	// Release the slot this child occupied in the parent's effect list, so a
 	// parent that repeatedly loads and disposes plugins does not grow forever.
-	if f.parentDisposer != nil {
-		f.parentDisposer()
-		f.parentDisposer = nil
+	f.mu.Lock()
+	release := f.parentDisposer
+	f.parentDisposer = nil
+	f.mu.Unlock()
+	if release != nil {
+		release()
 	}
 }
 

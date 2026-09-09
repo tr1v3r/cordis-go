@@ -867,3 +867,50 @@ func TestDisposingEffectDisposesNestedEffects(t *testing.T) {
 		t.Fatalf("outer effect not removed: %+v", effects)
 	}
 }
+
+func TestFailedLoadUnwindsPartialEffects(t *testing.T) {
+	root := cordis.New()
+	unwound := 0
+	plugin := cordis.Define[struct{}]("partial", func(ctx *cordis.Context, _ struct{}) error {
+		ctx.OnDispose(func() { unwound++ })
+		return errors.New("boom")
+	})
+	fiber, err := cordis.Load(root, plugin, struct{}{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fiber.State() != cordis.StateFailed {
+		t.Fatalf("want failed, got %s", fiber.State())
+	}
+	if unwound != 1 {
+		t.Fatalf("partial effects must be unwound on failure, got %d", unwound)
+	}
+	if fiber.Error() == nil {
+		t.Fatal("error must be preserved after rollback")
+	}
+}
+
+func TestFailedFiberReleasesServiceName(t *testing.T) {
+	root := cordis.New()
+	plugin := cordis.Define[struct{}]("partial", func(ctx *cordis.Context, _ struct{}) error {
+		if _, err := cordis.Provide[*fakeDB](ctx, "db", &fakeDB{name: "broken"}); err != nil {
+			return err
+		}
+		return errors.New("boom")
+	})
+	fiber, err := cordis.Load(root, plugin, struct{}{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fiber.State() != cordis.StateFailed {
+		t.Fatalf("want failed, got %s", fiber.State())
+	}
+	// The failed plugin's service registration must not shadow the name.
+	if _, err := cordis.Provide[*fakeDB](root, "db", &fakeDB{name: "good"}); err != nil {
+		t.Fatalf("failed fiber kept the service name occupied: %v", err)
+	}
+	got, ok := cordis.Get[*fakeDB](root, "db")
+	if !ok || got.name != "good" {
+		t.Fatalf("want good, got %v ok=%v", got, ok)
+	}
+}
