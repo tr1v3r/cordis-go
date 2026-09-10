@@ -178,8 +178,8 @@ func TestFailedPluginReportsError(t *testing.T) {
 	boom := errors.New("boom")
 	plugin := cordis.Define[struct{}]("bad", func(*cordis.Context, struct{}) error { return boom })
 	fiber, err := cordis.Load(root, plugin, struct{}{})
-	if err != nil {
-		t.Fatal(err)
+	if !errors.Is(err, boom) {
+		t.Fatalf("Load must report the failure, got %v", err)
 	}
 	if fiber.State() != cordis.StateFailed {
 		t.Fatalf("want failed, got %s", fiber.State())
@@ -195,8 +195,8 @@ func TestPanicInPluginIsContained(t *testing.T) {
 		panic("kaboom")
 	})
 	fiber, err := cordis.Load(root, plugin, struct{}{})
-	if err != nil {
-		t.Fatal(err)
+	if err == nil {
+		t.Fatal("a panicking plugin must be reported as a failed load")
 	}
 	if fiber.State() != cordis.StateFailed {
 		t.Fatalf("want failed, got %s", fiber.State())
@@ -218,8 +218,8 @@ func TestPluginConfigValidation(t *testing.T) {
 		})
 
 	fiber, err := cordis.Load(root, plugin, config{})
-	if err != nil {
-		t.Fatal(err)
+	if err == nil {
+		t.Fatal("invalid config must fail the load")
 	}
 	if fiber.State() != cordis.StateFailed {
 		t.Fatalf("want failed, got %s", fiber.State())
@@ -671,8 +671,8 @@ func TestUpdateOnFailedFiberReloads(t *testing.T) {
 		return nil
 	})
 	fiber, err := cordis.Load(root, plugin, config{Fail: true})
-	if err != nil {
-		t.Fatal(err)
+	if err == nil {
+		t.Fatal("the first load is meant to fail")
 	}
 	if fiber.State() != cordis.StateFailed {
 		t.Fatalf("want failed, got %s", fiber.State())
@@ -701,8 +701,8 @@ func TestErrorClearedAfterSuccessfulReload(t *testing.T) {
 		return nil
 	})
 	fiber, err := cordis.Load(root, plugin, config{Bad: true})
-	if err != nil {
-		t.Fatal(err)
+	if err == nil {
+		t.Fatal("the first load is meant to fail")
 	}
 	if err := fiber.Update(config{Bad: false}); err != nil {
 		t.Fatal(err)
@@ -871,13 +871,17 @@ func TestDisposingEffectDisposesNestedEffects(t *testing.T) {
 func TestFailedLoadUnwindsPartialEffects(t *testing.T) {
 	root := cordis.New()
 	unwound := 0
+	boom := errors.New("boom")
 	plugin := cordis.Define[struct{}]("partial", func(ctx *cordis.Context, _ struct{}) error {
 		ctx.OnDispose(func() { unwound++ })
-		return errors.New("boom")
+		return boom
 	})
 	fiber, err := cordis.Load(root, plugin, struct{}{})
-	if err != nil {
-		t.Fatal(err)
+	if !errors.Is(err, boom) {
+		t.Fatalf("a failed plugin body must be reported by Load, got %v", err)
+	}
+	if fiber == nil {
+		t.Fatal("Load must still return the fiber when the body fails")
 	}
 	if fiber.State() != cordis.StateFailed {
 		t.Fatalf("want failed, got %s", fiber.State())
@@ -885,22 +889,57 @@ func TestFailedLoadUnwindsPartialEffects(t *testing.T) {
 	if unwound != 1 {
 		t.Fatalf("partial effects must be unwound on failure, got %d", unwound)
 	}
-	if fiber.Error() == nil {
-		t.Fatal("error must be preserved after rollback")
+	if !errors.Is(fiber.Error(), boom) {
+		t.Fatalf("error must be preserved after rollback, got %v", fiber.Error())
+	}
+}
+
+// TestLoadErrorContract pins the boundary between the two ways a load can end
+// without the plugin body running to completion: a failure is an error, unmet
+// dependencies are not.
+func TestLoadErrorContract(t *testing.T) {
+	root := cordis.New()
+	boom := errors.New("boom")
+
+	failing := cordis.Define[struct{}]("failing", func(*cordis.Context, struct{}) error { return boom })
+	fiber, err := cordis.Load(root, failing, struct{}{})
+	if !errors.Is(err, boom) {
+		t.Fatalf("Load: want the startup error, got %v", err)
+	}
+	if fiber == nil || fiber.State() != cordis.StateFailed {
+		t.Fatalf("Load: want the failed fiber back, got %v", fiber)
+	}
+
+	// ctx.Load and Inject go through load(), so they share the contract.
+	if _, err := root.Load(failing, struct{}{}); !errors.Is(err, boom) {
+		t.Fatalf("ctx.Load: want the startup error, got %v", err)
+	}
+	if _, err := cordis.Inject(root, nil, func(*cordis.Context) error { return boom }); !errors.Is(err, boom) {
+		t.Fatalf("Inject: want the startup error, got %v", err)
+	}
+
+	waiting := cordis.Define[struct{}]("waiting", func(*cordis.Context, struct{}) error { return nil }).WithInject("nobody-provides-this")
+	pending, err := cordis.Load(root, waiting, struct{}{})
+	if err != nil {
+		t.Fatalf("unmet dependencies must not be an error, got %v", err)
+	}
+	if pending.State() != cordis.StatePending {
+		t.Fatalf("want pending, got %s", pending.State())
 	}
 }
 
 func TestFailedFiberReleasesServiceName(t *testing.T) {
 	root := cordis.New()
+	boom := errors.New("boom")
 	plugin := cordis.Define[struct{}]("partial", func(ctx *cordis.Context, _ struct{}) error {
 		if _, err := cordis.Provide[*fakeDB](ctx, "db", &fakeDB{name: "broken"}); err != nil {
 			return err
 		}
-		return errors.New("boom")
+		return boom
 	})
 	fiber, err := cordis.Load(root, plugin, struct{}{})
-	if err != nil {
-		t.Fatal(err)
+	if !errors.Is(err, boom) {
+		t.Fatalf("want the startup error, got %v", err)
 	}
 	if fiber.State() != cordis.StateFailed {
 		t.Fatalf("want failed, got %s", fiber.State())

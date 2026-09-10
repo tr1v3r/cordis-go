@@ -95,7 +95,12 @@ func (p *Plugin[C]) Run(ctx *Context, config any) error {
 	return p.Apply(ctx, value)
 }
 
-// Load starts a typed plugin in the parent context.
+// Load starts a typed plugin in the parent context and returns its fiber.
+//
+// Loading is synchronous, so when Load returns the fiber has already settled
+// into active, pending (dependencies unmet) or failed. A failed plugin body is
+// reported as the returned error and stays readable through fiber.Error(); the
+// fiber itself is still returned so the caller can inspect or restart it.
 func Load[C any](parent *Context, plugin *Plugin[C], config C) (*Fiber, error) {
 	return load(parent, plugin, config, nil)
 }
@@ -128,7 +133,14 @@ func load(parent *Context, def Definition, config any, extra []string) (*Fiber, 
 	if err != nil {
 		return nil, err
 	}
-	return newFiber(parent, rt, config, inject), nil
+	fiber := newFiber(parent, rt, config, inject)
+	if fiber.State() == StateFailed {
+		// Cordis surfaces a startup error through fiber.await(); a synchronous
+		// Load has no later await point, so it must return the error here or a
+		// failing plugin body would look like a successful load.
+		return fiber, fiber.Error()
+	}
+	return fiber, nil
 }
 
 func (c *core) runtimeFor(def Definition) (*runtime, error) {

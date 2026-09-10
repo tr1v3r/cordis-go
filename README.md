@@ -20,6 +20,10 @@ plugin := cordis.Define[dbConfig]("db", func(ctx *cordis.Context, cfg dbConfig) 
 fiber, err := cordis.Load(root, plugin, dbConfig{Path: "app.db"})
 ```
 
+加载是**同步**的：`Load` 返回时 fiber 已经定态。插件体（或配置校验）失败会同时从 `err` 和
+`fiber.Error()` 报出，fiber 本身照样返回，方便检查或 `Update` 重试；**依赖未就绪停在
+`pending` 不算错误**（`err == nil`）。
+
 ## 核心语义映射
 
 | Cordis (TypeScript) | cordis-go | 说明 |
@@ -65,6 +69,9 @@ pending ──依赖就绪──> loading ──成功──> active
 - `active`：已加载，且它提供的服务对依赖者可见
 - `failed`：插件体返回错误或 panic（panic 被捕获成 error，不会炸进程）
 - 依赖的提供者被替换时，fiber 会自动 unload → load，插件体重新执行
+
+`failed` 不是终态：`fiber.Update(cfg)` 或依赖重新就绪都会再跑一次。失败时
+`Load` 已经用 `err` 报过一次，`fiber.Error()` 保存同一个错误，直到下次加载成功才清空。
 
 ### 3. Effect — 可逆副作用
 
