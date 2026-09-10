@@ -47,7 +47,7 @@ const profileLayer = `[
 func main() {
 	registry := loader.NewRegistry()
 
-	loader.MustRegister(registry, "db", cordis.Define[dbConfig]("db", func(ctx *cordis.Context, cfg dbConfig) error {
+	loader.MustRegister(registry, "db", cordis.Define("db", func(ctx *cordis.Context, cfg dbConfig) error {
 		database := &DB{path: cfg.Path}
 		if _, err := cordis.Serve(ctx, "db", database); err != nil {
 			return err
@@ -56,7 +56,7 @@ func main() {
 		return nil
 	}))
 
-	loader.MustRegister(registry, "server", cordis.Define[serverConfig]("server", func(ctx *cordis.Context, cfg serverConfig) error {
+	loader.MustRegister(registry, "server", cordis.Define("server", func(ctx *cordis.Context, cfg serverConfig) error {
 		// The db dependency is declared below via WithInject, so this plugin only
 		// runs once the db service exists.
 		database, ok := cordis.Get[*DB](ctx, "db")
@@ -67,7 +67,7 @@ func main() {
 		if _, err := cordis.Serve(ctx, "server", server); err != nil {
 			return err
 		}
-		cordis.On[*Ping](ctx, "ping", func(ping *Ping) {
+		cordis.On(ctx, "ping", func(ping *Ping) {
 			ctx.Logger().Info("%s -> %s (db=%s)", ping.From, server.addr, database.path)
 		})
 		return nil
@@ -94,17 +94,17 @@ func main() {
 	}
 
 	fmt.Println("== event ==")
-	cordis.Emit[*Ping](root, "ping", &Ping{From: "cli"})
+	cordis.Emit(root, "ping", &Ping{From: "cli"})
 
 	// A plugin that needs a service nobody provides stays pending instead of
 	// failing; it activates as soon as the service appears.
-	pending, err := cordis.Load(root, cordis.Define[struct{}]("cache", func(ctx *cordis.Context, _ struct{}) error {
+	pending, err := cordis.Load(root, cordis.Define("cache", func(ctx *cordis.Context, _ struct{}) error {
 		ctx.Logger().Info("cache started")
 		return nil
 	}).WithInject("cache"), struct{}{})
 	must(err)
 	fmt.Printf("fiber %-8s state=%s\n", pending.Name(), pending.State())
-	if _, err := cordis.Provide[*DB](root, "cache", &DB{path: "cache.db"}); err != nil {
+	if _, err := cordis.Provide(root, "cache", &DB{path: "cache.db"}); err != nil {
 		must(err)
 	}
 	fmt.Printf("fiber %-8s state=%s\n", pending.Name(), pending.State())
