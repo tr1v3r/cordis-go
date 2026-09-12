@@ -17,7 +17,7 @@ func section(title string) { fmt.Printf("\n== %s ==\n", title) }
 func main() {
 	root := cordis.New()
 
-	// -------------------------------------------------------- two spellings --
+	// == 0. registration and dispatch ==
 	// Everything here goes through Context methods. Each one also exists as a
 	// package-level function taking the context first (`cordis.On(ctx, ...)`,
 	// `cordis.Emit(ctx, ...)`), which is what to reach for when the helper
@@ -27,14 +27,14 @@ func main() {
 	root.On("greet", func(s string) { fmt.Println("  got:", s) })
 	root.Emit("greet", "hello")
 
-	// ----------------------------------------------------------------- Emit --
+	// == 1. Emit ==
 	// Broadcast: every listener runs synchronously, return values are ignored.
 	section("1. Emit — broadcast, return values ignored")
 	root.On("tick", func(t tick) { fmt.Printf("  A saw tick %d\n", t.n) })
 	root.On("tick", func(t tick) { fmt.Printf("  B saw tick %d\n", t.n) })
 	root.Emit("tick", tick{n: 1})
 
-	// ----------------------------------------------------------- EmitScoped --
+	// == 2. EmitScoped ==
 	// Delivered only to listeners in the same isolation scope (two contexts
 	// isolated under one label share a scope).
 	section("2. EmitScoped — scoped broadcast")
@@ -52,7 +52,7 @@ func main() {
 	fmt.Println("  -- an unscoped Emit reaches everyone --")
 	root.Emit("beat", "hello-all")
 
-	// ----------------------------------------------------------------- Bail --
+	// == 3. Bail ==
 	// Sequential: the first listener returning non-nil / non-false wins and
 	// stops the dispatch.
 	section("3. Bail — first hit wins")
@@ -70,7 +70,7 @@ func main() {
 	value, bailed = root.Bail("ask", ask{q: "other"})
 	fmt.Printf("  ask(other) -> value=%v bailed=%v\n", value, bailed)
 
-	// ----------------------------------------------------------- BailScoped --
+	// == 4. BailScoped ==
 	section("4. BailScoped — scoped bail")
 	left := root.Isolate("db")
 	right := root.Isolate("db")
@@ -82,14 +82,14 @@ func main() {
 	value, _ = right.BailScoped("db", "pick", "x")
 	fmt.Println("  BailScoped(right) ->", value)
 
-	// --------------------------------------------------------------- Serial --
+	// == 5. Serial ==
 	section("5. Serial — an alias of Bail, kept for the Cordis spelling")
 	value, bailed = root.Serial("ask", ask{q: "cache"})
 	fmt.Printf("  Serial == Bail: value=%v bailed=%v\n", value, bailed)
 	value, bailed = left.SerialScoped("db", "pick", "x")
 	fmt.Printf("  SerialScoped == BailScoped: value=%v bailed=%v\n", value, bailed)
 
-	// ------------------------------------------------------------- Parallel --
+	// == 6. Parallel ==
 	// One goroutine per listener; panics are collected and joined into the
 	// returned error.
 	section("6. Parallel — concurrent, errors joined")
@@ -102,7 +102,7 @@ func main() {
 	fmt.Printf("  took %v (sequential would be 90ms+), err=%v\n",
 		time.Since(start).Round(10*time.Millisecond), err)
 
-	// ------------------------------------------------------- ParallelScoped --
+	// == 7. ParallelScoped ==
 	section("7. ParallelScoped — scoped concurrency")
 	scoped := root.Isolate("worker")
 	scoped.On("fan", func(string) { time.Sleep(20 * time.Millisecond) })
@@ -113,7 +113,7 @@ func main() {
 	err = scoped.ParallelScoped("worker", "fan", "x")
 	fmt.Println("  err:", err)
 
-	// ------------------------------------------------------------ Waterfall --
+	// == 8. Waterfall ==
 	// Onion model: a listener calls next to continue inward, and skipping next
 	// vetoes the rest; the outermost return value wins.
 	section("8. Waterfall — middleware chain")
@@ -132,7 +132,7 @@ func main() {
 	})
 	fmt.Println("  veto:", root.Waterfall("veto", "req", final))
 
-	// ------------------------------------------------------ WaterfallScoped --
+	// == 9. WaterfallScoped ==
 	section("9. WaterfallScoped — scoped middleware chain")
 	scopedLeft := root.IsolateShared("mw", "a")
 	scopedRight := root.IsolateShared("mw", "b")
@@ -145,7 +145,7 @@ func main() {
 	fmt.Println("  ", scopedLeft.WaterfallScoped("mw", "pipe", "x", final))
 	fmt.Println("  ", scopedRight.WaterfallScoped("mw", "pipe", "x", final))
 
-	// ------------------------------------------------- registration helpers --
+	// == 10. registration helpers ==
 	section("10. registration helpers: OnOnce / Prepend / Global")
 	root.OnOnce("once", func(string) { fmt.Println("  once listener ran") })
 	root.Emit("once", "a")
@@ -157,6 +157,7 @@ func main() {
 	}, cordis.Prepend())
 	root.Emit("order", "x")
 
+	// == 11. panicking listener isolation ==
 	// A panicking listener does not interrupt the others; it is logged, and
 	// Parallel reports it through the returned error.
 	section("11. panicking listener isolation")
