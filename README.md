@@ -39,7 +39,7 @@ fiber, err := rootCtx.Load(plugin, dbConfig{Path: "app.db"})
 | `ctx.inject(deps, cb)` | `cordis.Inject(ctx, deps, cb)` | 依赖就绪前挂起，变更时自动重载 |
 | `ctx.provide(name, v)` | `cordis.Provide[T](ctx, name, v)` | 返回 `(Disposer, error)`，所有权属于当前 fiber |
 | `ctx.effect(fn)` | `ctx.Effect(label, body)` | 可逆副作用 |
-| `ctx.on / emit / bail / waterfall` | `cordis.On` / `ctx.Emit` / `ctx.Bail` / `ctx.Waterfall` | 泛型事件，payload 类型在编译期确定；分发是 Context 方法，注册是包级函数 |
+| `ctx.on / emit / bail / waterfall` | `ctx.On` / `ctx.Emit` / `ctx.Bail` / `ctx.Waterfall` | 泛型事件，payload 类型在编译期确定；注册与分发都是 Context 方法，包级同名函数是等价形态 |
 | `ctx.isolate(name)` | `ctx.Isolate(name)` / `ctx.IsolateShared(name, label)` | 服务隔离，同名服务互不冲突；同一 label 可让两个作用域合并 |
 | `ctx.extend()` | `ctx.Fork(name)` | 共享 fiber 的子上下文 |
 | `@cordisjs/plugin-loader` + `cordis.yml` | `loader` 子包 + JSON 配置 | 配置驱动装配、patch 层、config dump |
@@ -115,27 +115,27 @@ dispose()
 
 ### 5. Event — 带作用域过滤的事件总线
 
-`On` / `OnOnce` / `OnValue` / `OnWaterfall` **注册**，`ctx.Emit` / `ctx.Bail` /
-`ctx.Serial` / `ctx.Parallel` / `ctx.Waterfall` **分发**。每个分发模式都有 `*Scoped`
-变体（`EmitScoped` / `BailScoped` / `SerialScoped` / `ParallelScoped` /
+`ctx.On` / `ctx.OnOnce` / `ctx.OnValue` / `ctx.OnWaterfall` **注册**，`ctx.Emit` /
+`ctx.Bail` / `ctx.Serial` / `ctx.Parallel` / `ctx.Waterfall` **分发**。每个分发模式都有
+`*Scoped` 变体（`EmitScoped` / `BailScoped` / `SerialScoped` / `ParallelScoped` /
 `WaterfallScoped`），只投递给同一隔离作用域内的监听者；`cordis.Global()` 可让监听者
 跨越作用域（对应 Cordis 的 `global` 选项）。
 
 ```go
 type Tick struct{ N int }
 
-cordis.On(rootCtx, "tick", func(t Tick) { ... })  // 注册：包级泛型函数
-rootCtx.Emit("tick", Tick{N: 1})                  // 分发：Context 方法（Go 1.27 泛型方法）
-cordis.Emit(rootCtx, "tick", Tick{N: 1})          // 等价函数形态，两者行为一致
+rootCtx.On("tick", func(t Tick) { ... })          // 注册：Context 方法（Go 1.27 泛型方法）
+rootCtx.Emit("tick", Tick{N: 1})                  // 分发：Context 方法
+cordis.On(rootCtx, "tick", func(t Tick) { ... })  // 等价函数形态，行为一致
 ```
 
-方法形态都有等价的包级函数（首参为 context），用于必须把助手当作值传递的场合——泛型方法要
+每个方法都有等价的包级函数（首参为 context），用于必须把助手当作值传递的场合——泛型方法要
 先实例化才能取方法值；`ctx.Load` / `ctx.LoadWithInject` 遵循同一规则。
 
-例外是**注册侧**：`On[E]` / `OnOnce[E]` / `OnValue[E]` / `OnWaterfall[E]` 只能留在包级——
-`Context.On` 这个名字已被非泛型版（payload 为 `any`）占用，而 Go 不允许泛型方法与非泛型
-方法同名。`Get` / `Provide` 的非泛型方法同理不可替换：运行期按名字取用服务是刚需，inject
-键就是配置里的字符串。
+唯一的例外是**服务查找**：`Get[T]` / `Provide[T]` / `ProvideChecked[T]` 只能留在包级，因为
+`Context` 上同名的**非泛型**方法（`Get(name) (any, bool)`、`Provide(name, any)` 等）删不得——
+运行期按名字取用服务是刚需，inject 键就是配置里的字符串，而 Go 不允许泛型方法与非泛型方法
+同名。
 
 ## 配置驱动装配（loader）
 

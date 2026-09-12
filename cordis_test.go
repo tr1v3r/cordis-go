@@ -435,6 +435,57 @@ func TestMethodFormsMatchFunctionForms(t *testing.T) {
 	}
 }
 
+// Registration follows the same rule as dispatch: every Context method has an
+// equivalent package function, and the two spellings register identically.
+func TestRegistrationMethodFormsMatchFunctionForms(t *testing.T) {
+	root := cordis.New()
+	var seen []string
+
+	// On
+	root.On[string]("on", func(v string) { seen = append(seen, "method:"+v) })
+	cordis.On[string](root, "on", func(v string) { seen = append(seen, "function:"+v) })
+	root.Emit("on", "x")
+	if want := []string{"method:x", "function:x"}; !reflect.DeepEqual(seen, want) {
+		t.Fatalf("On forms differ: want %v, got %v", want, seen)
+	}
+
+	// OnOnce fires exactly once in both spellings.
+	seen = nil
+	root.OnOnce[string]("once", func(v string) { seen = append(seen, "method:"+v) })
+	cordis.OnOnce[string](root, "once", func(v string) { seen = append(seen, "function:"+v) })
+	root.Emit("once", "a")
+	root.Emit("once", "b")
+	if want := []string{"method:a", "function:a"}; !reflect.DeepEqual(seen, want) {
+		t.Fatalf("OnOnce forms differ: want %v, got %v", want, seen)
+	}
+
+	// OnValue feeds Bail, in registration order.
+	root.OnValue[string]("ask", func(v string) any {
+		if v == "known" {
+			return "method"
+		}
+		return nil // abstain, let the next listener answer
+	})
+	cordis.OnValue[string](root, "ask", func(string) any { return "function" })
+	if v, ok := root.Bail("ask", "known"); !ok || v != "method" {
+		t.Fatalf("OnValue method form: got (%v,%v)", v, ok)
+	}
+	if v, ok := root.Bail("ask", "other"); !ok || v != "function" {
+		t.Fatalf("OnValue function form: got (%v,%v)", v, ok)
+	}
+
+	// OnWaterfall wraps the chain; first registered is outermost.
+	root.OnWaterfall[string]("wf", func(s string, next func(string) any) any {
+		return "m(" + next(s).(string) + ")"
+	})
+	cordis.OnWaterfall[string](root, "wf", func(s string, next func(string) any) any {
+		return "f(" + next(s).(string) + ")"
+	})
+	if got := root.Waterfall("wf", "x", func(s string) any { return s }); got != "m(f(x))" {
+		t.Fatalf("OnWaterfall forms differ: want m(f(x)), got %v", got)
+	}
+}
+
 func TestScopedEventFiltering(t *testing.T) {
 	root := cordis.New()
 	left := root.Isolate("db")
