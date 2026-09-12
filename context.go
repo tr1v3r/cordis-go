@@ -20,6 +20,22 @@ func WithLevel(level Level) Option {
 	return func(c *core) { c.logLevel = level }
 }
 
+// WithBaseContext hands the application's lifetime to ctx.
+//
+// Every Context.Context in the tree descends from ctx, so values and deadlines
+// propagate to plugins, and cancelling ctx disposes the root context: the fibers
+// unwind exactly as if the application had called Fiber.Dispose itself. There is
+// no cancel-only state, so a cancelled base context never leaves services and
+// listeners registered behind it.
+//
+// Use it to wire host signals and shutdown, not a request context: a deadline on
+// ctx tears down the whole application, not one call. A nil ctx leaves the
+// application owned by the caller, exactly as if the option were absent, and
+// without this option the root descends from context.Background().
+func WithBaseContext(ctx context.Context) Option {
+	return func(c *core) { c.baseCtx = ctx }
+}
+
 // core is the state shared by every context of one application. It is reached
 // through Context.Root() so that child contexts stay cheap to create.
 type core struct {
@@ -33,12 +49,16 @@ type core struct {
 	log             *loggerService
 	logWriter       io.Writer
 	logLevel        Level
+	// baseCtx is the host context the root lifecycle context descends from, or
+	// nil when the caller supplied none.
+	baseCtx context.Context
 }
 
 // New creates a root context and installs the built-in services.
 //
 // The returned context owns the whole application: disposing it disposes every
-// plugin fiber loaded beneath it.
+// plugin fiber loaded beneath it. WithBaseContext hands that ownership to a host
+// context instead.
 func New(opts ...Option) *Context {
 	appCore := &core{
 		serviceBindings: map[string]*serviceBinding{},
@@ -69,6 +89,20 @@ func New(opts ...Option) *Context {
 	if _, err := Provide[*LoggerService](rootCtx, "logger",
 		&LoggerService{svc: appCore.log}); err != nil {
 		panic(err)
+	}
+
+	// A host context owns the application: cancelling it disposes the root, so
+	// the tree unwinds instead of leaving services and listeners registered
+	// behind a context that is already cancelled. AfterFunc parks no goroutine
+	// while ctx is live, and the effect below is what releases the registration.
+	if appCore.baseCtx != nil {
+		stopBase := context.AfterFunc(appCore.baseCtx, rootFiber.Dispose)
+		// The registration can only fail because the root is already disposed: a
+		// base context cancelled before New returned fires the watcher while New
+		// is still running, and there is nothing left to stop.
+		_, _ = rootFiber.tryEffect("ctx.WithBaseContext", func() Disposer {
+			return func() { stopBase() }
+		})
 	}
 	return rootCtx
 }

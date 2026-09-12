@@ -101,7 +101,14 @@ type PluginEvent struct {
 }
 
 func newRootFiber(ctx *Context) *Fiber {
-	lifecycleCtx, cancel := context.WithCancel(context.Background())
+	// The root lifecycle context descends from the host context, when there is
+	// one, so plugins inherit its values and deadlines the same way they inherit
+	// those of a parent fiber.
+	base := ctx.shared.baseCtx
+	if base == nil {
+		base = context.Background()
+	}
+	lifecycleCtx, cancel := context.WithCancel(base)
 	return &Fiber{
 		UID:              0,
 		Ctx:              ctx,
