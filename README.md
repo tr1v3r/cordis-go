@@ -7,6 +7,7 @@ Cordis 是 [Koishi](https://koishi.chat) 与 DeepSeek Harness 的插件引擎，
 本库保留了这套语义，并用 Go 的方式重写了它依赖 JavaScript 动态特性的部分。
 
 ```go
+rootCtx := cordis.New()
 plugin := cordis.Define[dbConfig]("db", func(ctx *cordis.Context, cfg dbConfig) error {
     db, err := openDB(cfg.Path)
     if err != nil {
@@ -17,7 +18,7 @@ plugin := cordis.Define[dbConfig]("db", func(ctx *cordis.Context, cfg dbConfig) 
     return err
 })
 
-fiber, err := cordis.Load(root, plugin, dbConfig{Path: "app.db"})
+fiber, err := cordis.Load(rootCtx, plugin, dbConfig{Path: "app.db"})
 ```
 
 加载是**同步**的：`Load` 返回时 fiber 已经定态。插件体（或配置校验）失败会同时从 `err` 和
@@ -89,15 +90,16 @@ Cordis 的一切副作用都通过 `ctx` 注册，因此卸载时可以精确回
 都是同一套机制。
 
 ```go
+rootCtx := cordis.New()
 consumer := cordis.Define[struct{}]("consumer", func(ctx *cordis.Context, _ struct{}) error {
     db, _ := cordis.Get[*DB](ctx, "db") // 到这里 db 一定可用
     return nil
 }).WithInject("db")
 
-fiber, _ := cordis.Load(root, consumer, struct{}{})
+fiber, _ := cordis.Load(rootCtx, consumer, struct{}{})
 // fiber.State() == StatePending —— 还没人提供 db
 
-dispose, _ := cordis.Provide[*DB](root, "db", newDB())
+dispose, _ := cordis.Provide[*DB](rootCtx, "db", newDB())
 // fiber.State() == StateActive —— 自动激活
 
 dispose()
@@ -119,6 +121,7 @@ Go 不能在运行时 `import` 代码，所以插件在编译期注册进 `Regis
 **选择与配置**（与 Caddy 的模块系统同样的取舍）。
 
 ```go
+rootCtx := cordis.New()
 registry := loader.NewRegistry()
 loader.MustRegister(registry, "db", dbPlugin)
 
@@ -127,7 +130,7 @@ profile, _ := loader.ParsePatchLayer("profile", patchJSON) // 补丁层：按 id
 
 tree, err := loader.Compose([]loader.Layer{base, profile}, loader.Strict())
 tree.Dump(os.Stdout)
-fibers, err := tree.Load(root, registry)
+fibers, err := tree.Load(rootCtx, registry)
 ```
 
 补丁语义与 Cordis 一致，有两点必须强调：

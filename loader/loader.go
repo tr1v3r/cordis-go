@@ -352,19 +352,19 @@ func (t *Tree) Size() int {
 
 // Registry maps configuration entry names to plugin definitions.
 type Registry struct {
-	mu    sync.RWMutex
-	items map[string]*registered
+	mu      sync.RWMutex
+	plugins map[string]*registeredPlugin
 }
 
-type registered struct {
-	name   string
-	inject []string
-	load   func(ctx *cordis.Context, config map[string]any, extra []string) (*cordis.Fiber, error)
+// registeredPlugin erases Plugin[C]'s config type behind the loader's
+// map-based configuration boundary.
+type registeredPlugin struct {
+	load func(ctx *cordis.Context, config map[string]any, extra []string) (*cordis.Fiber, error)
 }
 
 // NewRegistry creates an empty registry.
 func NewRegistry() *Registry {
-	return &Registry{items: map[string]*registered{}}
+	return &Registry{plugins: map[string]*registeredPlugin{}}
 }
 
 // Register adds a plugin under the name used by configuration entries.
@@ -380,12 +380,10 @@ func Register[C any](registry *Registry, name string, plugin *cordis.Plugin[C]) 
 	}
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
-	if _, exists := registry.items[name]; exists {
+	if _, exists := registry.plugins[name]; exists {
 		return fmt.Errorf("loader: plugin %q is already registered", name)
 	}
-	registry.items[name] = &registered{
-		name:   name,
-		inject: append([]string(nil), plugin.Inject...),
+	registry.plugins[name] = &registeredPlugin{
 		load: func(ctx *cordis.Context, config map[string]any, extra []string) (*cordis.Fiber, error) {
 			typed, err := decodeConfig[C](config)
 			if err != nil {
@@ -404,11 +402,11 @@ func MustRegister[C any](registry *Registry, name string, plugin *cordis.Plugin[
 	}
 }
 
-func (r *Registry) get(name string) (*registered, bool) {
+func (r *Registry) get(name string) (*registeredPlugin, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	entry, ok := r.items[name]
-	return entry, ok
+	plugin, ok := r.plugins[name]
+	return plugin, ok
 }
 
 // Has reports whether a plugin name is registered.
@@ -421,8 +419,8 @@ func (r *Registry) Has(name string) bool {
 func (r *Registry) Names() []string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	names := make([]string, 0, len(r.items))
-	for name := range r.items {
+	names := make([]string, 0, len(r.plugins))
+	for name := range r.plugins {
 		names = append(names, name)
 	}
 	sort.Strings(names)
@@ -490,11 +488,11 @@ func (t *Tree) loadNodes(ctx *cordis.Context, registry *Registry, nodes []*Node,
 			}
 			continue
 		}
-		entry, ok := registry.get(node.Name)
+		registeredPlugin, ok := registry.get(node.Name)
 		if !ok {
 			return fmt.Errorf("loader: entry %q references unknown plugin %q", node.ID, node.Name)
 		}
-		fiber, err := entry.load(ctx, node.Config, deps)
+		fiber, err := registeredPlugin.load(ctx, node.Config, deps)
 		if err != nil {
 			return fmt.Errorf("loader: entry %q (%s): %w", node.ID, node.Name, err)
 		}
