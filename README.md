@@ -61,6 +61,23 @@ ctx.OnDispose(func() { order = append(order, "second") })
 `ctx.Context()` 返回一个随 fiber 一起取消的 `context.Context`，交给插件启动的 goroutine，
 这样 goroutine 的存活期和插件一致。
 
+根 fiber 的 `context.Context` 默认派生自 `context.Background()`，整棵树的寿命由调用方掌握
+（`root.Fiber().Dispose()`）。要让宿主的信号/取消来接管，用 `cordis.WithBaseContext`：
+
+```go
+ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+defer stop()
+
+root := cordis.New(cordis.WithBaseContext(ctx))
+// ctx 一取消 = root.Fiber().Dispose()：fiber 走 unloading → disposed，
+// disposer 按 LIFO 回收，插件的 ctx.Context() 同时结束。
+```
+
+语义只有一条：**base context 取消 ≡ `root.Fiber().Dispose()`**，不存在"goroutine 停了但服务
+还注册着"的中间态。两点注意：base context 的 value 与 deadline 会被整棵树继承，所以**不要**
+把 request-scoped 的 context 传进来（一个 30s 的请求 deadline 会拆掉整个应用）；`root.Done()`
+依然只由 Dispose 关闭。不传这个 option 时行为与以前完全一致。
+
 ### 2. Fiber — 每个插件实例的生命周期状态机
 
 ```
