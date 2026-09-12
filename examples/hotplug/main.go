@@ -33,20 +33,21 @@ func main() {
 	registry := cordis.MustGet[cordis.Registry](rootCtx, "registry")
 
 	activations := 0
-	clientPlugin := cordis.Define[struct{}]("greeter-client", func(ctx *cordis.Context, _ struct{}) error {
-		activations++
-		activation := activations
-		greeter := cordis.MustGet[Greeter](ctx, "greeter")
-		fmt.Printf("client activation #%d uses %s\n", activation, greeter.Version())
+	clientPlugin := cordis.Define[struct{}]("greeter-client",
+		func(ctx *cordis.Context, _ struct{}) error {
+			activations++
+			activation := activations
+			greeter := cordis.MustGet[Greeter](ctx, "greeter")
+			fmt.Printf("client activation #%d uses %s\n", activation, greeter.Version())
 
-		cordis.OnValue[greetRequest](ctx, "greet", func(request greetRequest) any {
-			return greeter.Greet(request.Name)
-		})
-		ctx.OnDispose(func() {
-			fmt.Printf("client activation #%d stopped\n", activation)
-		})
-		return nil
-	}).WithInject("greeter")
+			cordis.OnValue[greetRequest](ctx, "greet", func(request greetRequest) any {
+				return greeter.Greet(request.Name)
+			})
+			ctx.OnDispose(func() {
+				fmt.Printf("client activation #%d stopped\n", activation)
+			})
+			return nil
+		}).WithInject("greeter")
 
 	legacyPlugin := newGreeterPlugin("greeter-v1", &greeter{
 		version: "v1",

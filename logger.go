@@ -19,6 +19,7 @@ const (
 	LevelSilent
 )
 
+// String returns the level's lowercase name.
 func (l Level) String() string {
 	switch l {
 	case LevelDebug:
@@ -84,7 +85,9 @@ type Logger struct {
 func (l *Logger) Name() string { return l.name }
 
 // Debug logs at debug level.
-func (l *Logger) Debug(format string, args ...any) { l.svc.logf(LevelDebug, l.name, format, args...) }
+func (l *Logger) Debug(format string, args ...any) {
+	l.svc.logf(LevelDebug, l.name, format, args...)
+}
 
 // Info logs at info level.
 func (l *Logger) Info(format string, args ...any) { l.svc.logf(LevelInfo, l.name, format, args...) }
@@ -93,4 +96,6 @@ func (l *Logger) Info(format string, args ...any) { l.svc.logf(LevelInfo, l.name
 func (l *Logger) Warn(format string, args ...any) { l.svc.logf(LevelWarn, l.name, format, args...) }
 
 // Error logs at error level.
-func (l *Logger) Error(format string, args ...any) { l.svc.logf(LevelError, l.name, format, args...) }
+func (l *Logger) Error(format string, args ...any) {
+	l.svc.logf(LevelError, l.name, format, args...)
+}

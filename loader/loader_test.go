@@ -51,7 +51,9 @@ func TestComposePatchReplacesWholeConfig(t *testing.T) {
 }
 
 func TestComposeUnmatchedIDWarnsAndStrictFails(t *testing.T) {
-	layers := []loader.Layer{{Label: "patch", Patch: true, Entries: []*loader.Patch{{ID: "missing"}}}}
+	layers := []loader.Layer{
+		{Label: "patch", Patch: true, Entries: []*loader.Patch{{ID: "missing"}}},
+	}
 
 	tree, err := loader.Compose(layers)
 	if err != nil {
@@ -89,13 +91,15 @@ func TestComposeInsertAddsEntries(t *testing.T) {
 func TestTreeLoadDecodesConfigAndGroups(t *testing.T) {
 	registry := loader.NewRegistry()
 	var path string
-	loader.MustRegister(registry, "db", cordis.Define[dbConfig]("db", func(_ *cordis.Context, cfg dbConfig) error {
-		path = cfg.Path
-		return nil
-	}))
-	loader.MustRegister(registry, "noop", cordis.Define[struct{}]("noop", func(*cordis.Context, struct{}) error {
-		return nil
-	}))
+	loader.MustRegister(registry, "db",
+		cordis.Define[dbConfig]("db", func(_ *cordis.Context, cfg dbConfig) error {
+			path = cfg.Path
+			return nil
+		}))
+	loader.MustRegister(registry, "noop",
+		cordis.Define[struct{}]("noop", func(*cordis.Context, struct{}) error {
+			return nil
+		}))
 
 	layer := loader.Layer{Label: "base", Entries: []*loader.Patch{
 		{ID: "grp", Group: boolptr(true), Plugins: []*loader.Patch{
@@ -126,9 +130,10 @@ func TestTreeLoadDecodesConfigAndGroups(t *testing.T) {
 
 func TestTreeLoadAppliesEntryInject(t *testing.T) {
 	registry := loader.NewRegistry()
-	loader.MustRegister(registry, "consumer", cordis.Define[struct{}]("consumer", func(*cordis.Context, struct{}) error {
-		return nil
-	}))
+	loader.MustRegister(registry, "consumer",
+		cordis.Define[struct{}]("consumer", func(*cordis.Context, struct{}) error {
+			return nil
+		}))
 
 	layer := loader.Layer{Label: "base", Entries: []*loader.Patch{{
 		ID: "consumer", Name: strptr("consumer"), Inject: &[]string{"db"},
@@ -177,7 +182,8 @@ func TestDumpReportsProvenance(t *testing.T) {
 		t.Fatal(err)
 	}
 	dump := tree.DumpString()
-	for _, want := range []string{"# layers: base -> profile", "# from base; patched by profile", `config: {"path": "profile.db"}`} {
+	for _, want := range []string{"# layers: base -> profile",
+		"# from base; patched by profile", `config: {"path": "profile.db"}`} {
 		if !strings.Contains(dump, want) {
 			t.Fatalf("dump missing %q:\n%s", want, dump)
 		}
@@ -232,11 +238,12 @@ func TestComposePatchesNestedEntryByID(t *testing.T) {
 func TestTreeLoadRollsBackOnError(t *testing.T) {
 	registry := loader.NewRegistry()
 	var events []string
-	loader.MustRegister(registry, "db", cordis.Define[struct{}]("db", func(ctx *cordis.Context, _ struct{}) error {
-		events = append(events, "load")
-		ctx.OnDispose(func() { events = append(events, "unload") })
-		return nil
-	}))
+	loader.MustRegister(registry, "db",
+		cordis.Define[struct{}]("db", func(ctx *cordis.Context, _ struct{}) error {
+			events = append(events, "load")
+			ctx.OnDispose(func() { events = append(events, "unload") })
+			return nil
+		}))
 
 	layer := loader.Layer{Label: "base", Entries: []*loader.Patch{
 		{ID: "a", Name: strptr("db")},
@@ -256,9 +263,10 @@ func TestTreeLoadRollsBackOnError(t *testing.T) {
 
 func TestTreeLoadFailsOnFailedEntry(t *testing.T) {
 	registry := loader.NewRegistry()
-	loader.MustRegister(registry, "bad", cordis.Define[struct{}]("bad", func(*cordis.Context, struct{}) error {
-		return errors.New("boom")
-	}))
+	loader.MustRegister(registry, "bad",
+		cordis.Define[struct{}]("bad", func(*cordis.Context, struct{}) error {
+			return errors.New("boom")
+		}))
 	layer := loader.Layer{Label: "base", Entries: []*loader.Patch{{ID: "a", Name: strptr("bad")}}}
 	tree, err := loader.Compose([]loader.Layer{layer})
 	if err != nil {
@@ -271,9 +279,10 @@ func TestTreeLoadFailsOnFailedEntry(t *testing.T) {
 
 func TestGroupInjectGatesChildren(t *testing.T) {
 	registry := loader.NewRegistry()
-	loader.MustRegister(registry, "child", cordis.Define[struct{}]("child", func(*cordis.Context, struct{}) error {
-		return nil
-	}))
+	loader.MustRegister(registry, "child",
+		cordis.Define[struct{}]("child", func(*cordis.Context, struct{}) error {
+			return nil
+		}))
 	layer := loader.Layer{Label: "base", Entries: []*loader.Patch{{
 		ID: "grp", Group: boolptr(true), Inject: &[]string{"db"},
 		Plugins: []*loader.Patch{{ID: "child", Name: strptr("child")}},

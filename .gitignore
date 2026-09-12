@@ -4,6 +4,7 @@
 *.test
 *.out
 coverage.txt
+__debug_bin*
 
 # Editor
 .idea/
