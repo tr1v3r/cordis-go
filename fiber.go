@@ -54,7 +54,7 @@ const epochInactive = "\x00inactive"
 //
 // A fiber owns a context, the effects registered through it, and the services
 // it provides. Loading the same plugin twice creates two independent fibers
-// under one shared runtime, exactly like Cordis v4.
+// under one shared plugin runtime, exactly like Cordis v4.
 type Fiber struct {
 	// UID is unique within the application; 0 is the root fiber.
 	UID int
@@ -66,25 +66,25 @@ type Fiber struct {
 	runtime *pluginRuntime
 	inject  map[string]struct{}
 
-	mu        sync.Mutex
-	state     FiberState
-	err       error
-	epoch     string
-	store     map[string]*impl
-	config    any
-	rawConfig any
-	effects   *disposableList
-	busy      bool
-	dirty     bool
-	disposed  bool
-	cleaned   bool
-	root      bool
-	current   *effectEntry
+	mu               sync.Mutex
+	state            FiberState
+	err              error
+	epoch            string
+	resolvedServices map[string]*serviceBinding
+	config           any
+	rawConfig        any
+	effects          *disposableList
+	busy             bool
+	dirty            bool
+	disposed         bool
+	cleaned          bool
+	root             bool
+	current          *effectEntry
 
-	done           chan struct{}
-	lifecycleCtx   context.Context
-	cancel         context.CancelFunc
-	parentDisposer Disposer
+	done                 chan struct{}
+	lifecycleCtx         context.Context
+	cancel               context.CancelFunc
+	parentEffectDisposer Disposer
 }
 
 // StatusEvent is emitted as "internal/status" whenever a fiber changes state.
@@ -102,15 +102,15 @@ type PluginEvent struct {
 func newRootFiber(ctx *Context) *Fiber {
 	lifecycleCtx, cancel := context.WithCancel(context.Background())
 	return &Fiber{
-		UID:          0,
-		Ctx:          ctx,
-		state:        StateActive,
-		root:         true,
-		store:        map[string]*impl{},
-		effects:      newDisposableList(),
-		done:         make(chan struct{}),
-		lifecycleCtx: lifecycleCtx,
-		cancel:       cancel,
+		UID:              0,
+		Ctx:              ctx,
+		state:            StateActive,
+		root:             true,
+		resolvedServices: map[string]*serviceBinding{},
+		effects:          newDisposableList(),
+		done:             make(chan struct{}),
+		lifecycleCtx:     lifecycleCtx,
+		cancel:           cancel,
 	}
 }
 
@@ -137,13 +137,13 @@ func newFiber(parentCtx *Context, runtime *pluginRuntime, cfg any, inject map[st
 	// Register the child's disposal on the parent, then publish the handle under
 	// the fiber lock: a concurrent parent unload can dispose this fiber before
 	// the assignment lands, and the handle must not be lost.
-	release := parentCtx.fiber.onDispose(fiber.Dispose)
+	parentEffectDisposer := parentCtx.fiber.onDispose(fiber.Dispose)
 	fiber.mu.Lock()
 	if fiber.disposed {
 		fiber.mu.Unlock()
-		release()
+		parentEffectDisposer()
 	} else {
-		fiber.parentDisposer = release
+		fiber.parentEffectDisposer = parentEffectDisposer
 		fiber.mu.Unlock()
 	}
 	parentCtx.shared.addFiber(runtime, fiber)
@@ -205,15 +205,15 @@ func (f *Fiber) Inject() []string {
 	return names
 }
 
-// Store returns the service implementations this fiber resolved while active.
+// Store returns the services this fiber resolved while active.
 func (f *Fiber) Store() map[string]any {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	out := make(map[string]any, len(f.store))
-	for name, serviceImpl := range f.store {
-		out[name] = serviceImpl.value
+	services := make(map[string]any, len(f.resolvedServices))
+	for name, binding := range f.resolvedServices {
+		services[name] = binding.service
 	}
-	return out
+	return services
 }
 
 // Effects returns the live effect metadata tree of this fiber.
@@ -407,12 +407,12 @@ func (f *Fiber) computeEpoch() string {
 	names := f.Inject()
 	var builder strings.Builder
 	for _, name := range names {
-		serviceImpl := f.shared().lookupStrict(name, f.Ctx.isolateLabel(name))
-		if serviceImpl == nil {
+		binding := f.shared().lookupService(f.Ctx.isolateLabel(name))
+		if binding == nil {
 			return epochInactive
 		}
 		builder.WriteByte(':')
-		builder.WriteString(strconv.Itoa(serviceImpl.fiber.UID))
+		builder.WriteString(strconv.Itoa(binding.provider.UID))
 	}
 	return builder.String()
 }
@@ -423,19 +423,19 @@ func (f *Fiber) load() {
 	f.mu.Unlock()
 	f.setState(StateLoading)
 
-	resolvedServices := make(map[string]*impl, len(f.inject))
+	resolvedServices := make(map[string]*serviceBinding, len(f.inject))
 	for _, name := range f.Inject() {
-		serviceImpl := f.shared().lookupStrict(name, f.Ctx.isolateLabel(name))
-		if serviceImpl == nil {
+		binding := f.shared().lookupService(f.Ctx.isolateLabel(name))
+		if binding == nil {
 			// A dependency vanished between the epoch computation and now.
 			f.refresh()
 			return
 		}
-		resolvedServices[name] = serviceImpl
+		resolvedServices[name] = binding
 	}
 
 	f.mu.Lock()
-	f.store = resolvedServices
+	f.resolvedServices = resolvedServices
 	raw := f.rawConfig
 	f.mu.Unlock()
 
@@ -494,7 +494,7 @@ func (f *Fiber) unload() {
 		f.runDisposer(entry)
 	}
 	f.mu.Lock()
-	f.store = nil
+	f.resolvedServices = nil
 	f.config = nil
 	disposed := f.disposed
 	f.mu.Unlock()
@@ -565,11 +565,11 @@ func (f *Fiber) Dispose() {
 	// Release the slot this child occupied in the parent's effect list, so a
 	// parent that repeatedly loads and disposes plugins does not grow forever.
 	f.mu.Lock()
-	release := f.parentDisposer
-	f.parentDisposer = nil
+	parentEffectDisposer := f.parentEffectDisposer
+	f.parentEffectDisposer = nil
 	f.mu.Unlock()
-	if release != nil {
-		release()
+	if parentEffectDisposer != nil {
+		parentEffectDisposer()
 	}
 }
 
