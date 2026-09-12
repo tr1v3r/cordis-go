@@ -27,6 +27,7 @@ type Server struct {
 	addr string
 }
 
+// Stop is the shutdown hook Serve runs when the owning fiber unloads.
 func (s *Server) Stop() error {
 	fmt.Printf("server %s stopped\n", s.addr)
 	return nil
@@ -71,7 +72,7 @@ func main() {
 			if _, err := cordis.Serve(ctx, "server", server); err != nil {
 				return err
 			}
-			cordis.On(ctx, "ping", func(ping *Ping) {
+			ctx.On("ping", func(ping *Ping) {
 				ctx.Logger().Info("%s -> %s (db=%s)", ping.From, server.addr, database.path)
 			})
 			return nil
@@ -98,7 +99,7 @@ func main() {
 	}
 
 	fmt.Println("== event ==")
-	cordis.Emit(rootCtx, "ping", &Ping{From: "cli"})
+	rootCtx.Emit("ping", &Ping{From: "cli"})
 
 	// A plugin that needs a service nobody provides stays pending instead of
 	// failing; it activates as soon as the service appears.
@@ -109,7 +110,7 @@ func main() {
 		}).WithInject("cache"), struct{}{})
 	must(err)
 	fmt.Printf("fiber %-14s state=%s\n", cacheConsumerFiber.Name(), cacheConsumerFiber.State())
-	if _, err := rootCtx.Provide("cache", &DB{path: "cache.db"}); err != nil {
+	if _, err := cordis.Provide[*DB](rootCtx, "cache", &DB{path: "cache.db"}); err != nil {
 		must(err)
 	}
 	fmt.Printf("fiber %-14s state=%s\n", cacheConsumerFiber.Name(), cacheConsumerFiber.State())

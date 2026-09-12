@@ -76,7 +76,7 @@ func main() {
 }
 
 func mustLoad[C any](ctx *cordis.Context, plugin *cordis.Plugin[C], config C) *cordis.Fiber {
-	fiber, err := cordis.Load(ctx, plugin, config)
+	fiber, err := ctx.Load(plugin, config)
 	if err != nil {
 		panic(err)
 	}

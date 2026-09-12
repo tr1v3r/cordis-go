@@ -20,7 +20,7 @@ func main() {
 		return nil
 	})
 
-	fiber, err := cordis.Load(rootCtx, plugin, struct{}{})
+	fiber, err := rootCtx.Load(plugin, struct{}{})
 	if err != nil {
 		panic(err)
 	}

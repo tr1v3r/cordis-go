@@ -18,20 +18,14 @@ func main() {
 	root := cordis.New()
 
 	// -------------------------------------------------------- two spellings --
-	// Registration and dispatch are both Context methods; the package-level
-	// function of the same name forwards to it and behaves identically:
-	//
-	//	root.On("tick", func(t tick) { ... })   // method form (preferred)
-	//	cordis.On(root, "tick", ...)            // function form, context first
-	//	root.Emit("tick", t)
-	//	cordis.Emit(root, "tick", t)
-	//
-	// Keep the function form for values: a generic method has to be instantiated
-	// before it can be passed around.
+	// Everything here goes through Context methods. Each one also exists as a
+	// package-level function taking the context first (`cordis.On(ctx, ...)`,
+	// `cordis.Emit(ctx, ...)`), which is what to reach for when the helper
+	// itself must be passed around: a generic method has to be instantiated
+	// before it can be used as a value.
 	section("0. registration and dispatch are both ctx methods")
-	root.On("greet", func(s string) { fmt.Println("  got:", s) }) // method form
-	root.Emit("greet", "method form")                             // method form
-	cordis.Emit(root, "greet", "function form")                   // function form, equivalent
+	root.On("greet", func(s string) { fmt.Println("  got:", s) })
+	root.Emit("greet", "hello")
 
 	// ----------------------------------------------------------------- Emit --
 	// Broadcast: every listener runs synchronously, return values are ignored.
@@ -71,7 +65,6 @@ func main() {
 	root.OnValue("ask", func(a ask) any { return "fallback:" + a.q })
 	root.OnValue("ask", func(ask) any { return "never-reached" })
 
-	// function form: cordis.Bail(root, "ask", ...)
 	value, bailed := root.Bail("ask", ask{q: "cache"})
 	fmt.Printf("  ask(cache) -> value=%v bailed=%v\n", value, bailed)
 	value, bailed = root.Bail("ask", ask{q: "other"})
