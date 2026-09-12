@@ -25,7 +25,7 @@ func WithLevel(level Level) Option {
 type core struct {
 	mu              sync.Mutex
 	serviceBindings map[string]*serviceBinding
-	pluginRuntimes  map[Definition]*pluginRuntime
+	runtimes        map[Definition]*runtime
 	counter         int
 	scopeSeq        int
 	root            *Context
@@ -42,7 +42,7 @@ type core struct {
 func New(opts ...Option) *Context {
 	appCore := &core{
 		serviceBindings: map[string]*serviceBinding{},
-		pluginRuntimes:  map[Definition]*pluginRuntime{},
+		runtimes:        map[Definition]*runtime{},
 		logWriter:       io.Discard,
 		logLevel:        LevelInfo,
 	}
@@ -340,15 +340,15 @@ type Registry struct {
 func (r *Registry) Size() int {
 	r.shared.mu.Lock()
 	defer r.shared.mu.Unlock()
-	return len(r.shared.pluginRuntimes)
+	return len(r.shared.runtimes)
 }
 
 // Plugins returns the names of every plugin definition with live fibers.
 func (r *Registry) Plugins() []string {
 	r.shared.mu.Lock()
 	defer r.shared.mu.Unlock()
-	names := make([]string, 0, len(r.shared.pluginRuntimes))
-	for def := range r.shared.pluginRuntimes {
+	names := make([]string, 0, len(r.shared.runtimes))
+	for def := range r.shared.runtimes {
 		names = append(names, def.PluginName())
 	}
 	return names

@@ -21,9 +21,9 @@ type Definition interface {
 	Run(ctx *Context, config any) error
 }
 
-// pluginRuntime is the per-definition record shared by every live instance of
+// runtime is the per-definition record shared by every live instance of
 // one plugin.
-type pluginRuntime struct {
+type runtime struct {
 	name       string
 	definition Definition
 	fibers     []*Fiber
@@ -144,18 +144,18 @@ func load(parentCtx *Context, definition Definition, config any, extra []string)
 	return fiber, nil
 }
 
-func (c *core) runtimeFor(definition Definition) (*pluginRuntime, error) {
+func (c *core) runtimeFor(definition Definition) (*runtime, error) {
 	kind := reflect.TypeOf(definition)
 	if kind == nil || !kind.Comparable() {
 		return nil, newError(ErrInvalidPlugin, "plugin definition must be a comparable pointer, got %T", definition)
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if existing, ok := c.pluginRuntimes[definition]; ok {
+	if existing, ok := c.runtimes[definition]; ok {
 		return existing, nil
 	}
-	runtime := &pluginRuntime{name: definition.PluginName(), definition: definition}
-	c.pluginRuntimes[definition] = runtime
+	runtime := &runtime{name: definition.PluginName(), definition: definition}
+	c.runtimes[definition] = runtime
 	return runtime, nil
 }
 
