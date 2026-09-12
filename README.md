@@ -206,10 +206,13 @@ epoch 重载、隔离作用域、事件分发五种模式、作用域过滤、�
 ```sh
 go test ./...
 go run ./examples/basic
+go run ./examples/hotplug
 go run ./cmd/cordis dump base.json profile.json
 ```
 
-`examples/basic` 演示了：配置层叠加与 dump、依赖注入、事件、插件挂起与激活、卸载回收。
+`examples/basic` 演示了配置层叠加与 dump、依赖注入、事件、插件挂起与激活、卸载回收。
+`examples/hotplug` 演示应用持续运行时 provider 插件消失，依赖方进入 `pending`，再注册一个
+提供同名服务的新插件后依赖方自动恢复。
 
 ## 状态
 
@@ -221,16 +224,20 @@ go run ./cmd/cordis dump base.json profile.json
 
 ```
 cordis-go/
-├── context.go     # Context：查找、隔离、Fork、生命周期
-├── fiber.go       # Fiber：状态机、epoch、加载/卸载
-├── service.go     # 服务注册、查找、通知依赖者
-├── registry.go    # 插件定义与 plugin runtime 注册表
-├── events.go      # 事件总线与五种分发模式
-├── logger.go      # 轻量日志服务
-├── disposable.go  # 幂等 Disposer 与 effect 列表
-├── loader/        # 配置驱动装配、patch 层、config dump
-├── cmd/cordis/    # 配置 dump 命令行工具
-└── examples/basic # 端到端示例
+├── context.go            # Context：查找、隔离、Fork、生命周期
+├── fiber.go              # Fiber：状态机、epoch、加载/卸载
+├── service.go            # 服务注册、查找、通知依赖者
+├── registry.go           # 插件定义与 plugin runtime 注册表
+├── events.go             # 事件总线与五种分发模式
+├── logger.go             # 轻量日志服务
+├── disposable.go         # 幂等 Disposer 与 effect 列表
+├── loader/               # 配置驱动装配、patch 层、config dump
+├── cmd/cordis/           # 配置 dump 命令行工具
+└── examples/
+    ├── basic             # 端到端示例
+    ├── hotplug           # 运行中替换插件
+    ├── serviceprobe      # 服务容器行为探针
+    └── walkthrough       # effect 卸载顺序
 ```
 
 ## 参考
