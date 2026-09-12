@@ -21,11 +21,12 @@ type Definition interface {
 	Run(ctx *Context, config any) error
 }
 
-// runtime is the mutable record shared by every fiber of one plugin.
-type runtime struct {
-	name   string
-	def    Definition
-	fibers []*Fiber
+// pluginRuntime is the per-definition record shared by every live instance of
+// one plugin.
+type pluginRuntime struct {
+	name       string
+	definition Definition
+	fibers     []*Fiber
 }
 
 // Plugin is a typed plugin definition.
@@ -110,8 +111,8 @@ func LoadWithInject[C any](parentCtx *Context, plugin *Plugin[C], config C, extr
 	return load(parentCtx, plugin, config, extra)
 }
 
-func load(parentCtx *Context, def Definition, config any, extra []string) (*Fiber, error) {
-	if def == nil {
+func load(parentCtx *Context, definition Definition, config any, extra []string) (*Fiber, error) {
+	if definition == nil {
 		return nil, newError(ErrInvalidPlugin, "nil plugin definition")
 	}
 	if err := parentCtx.fiber.assertActive(); err != nil {
@@ -119,7 +120,7 @@ func load(parentCtx *Context, def Definition, config any, extra []string) (*Fibe
 	}
 
 	inject := map[string]struct{}{}
-	for _, name := range def.InjectKeys() {
+	for _, name := range definition.InjectKeys() {
 		if name != "" {
 			inject[name] = struct{}{}
 		}
@@ -129,11 +130,11 @@ func load(parentCtx *Context, def Definition, config any, extra []string) (*Fibe
 			inject[name] = struct{}{}
 		}
 	}
-	rt, err := parentCtx.shared.runtimeFor(def)
+	runtime, err := parentCtx.shared.runtimeFor(definition)
 	if err != nil {
 		return nil, err
 	}
-	fiber := newFiber(parentCtx, rt, config, inject)
+	fiber := newFiber(parentCtx, runtime, config, inject)
 	if fiber.State() == StateFailed {
 		// Cordis surfaces a startup error through fiber.await(); a synchronous
 		// Load has no later await point, so it must return the error here or a
@@ -143,19 +144,19 @@ func load(parentCtx *Context, def Definition, config any, extra []string) (*Fibe
 	return fiber, nil
 }
 
-func (c *core) runtimeFor(def Definition) (*runtime, error) {
-	kind := reflect.TypeOf(def)
+func (c *core) runtimeFor(definition Definition) (*pluginRuntime, error) {
+	kind := reflect.TypeOf(definition)
 	if kind == nil || !kind.Comparable() {
-		return nil, newError(ErrInvalidPlugin, "plugin definition must be a comparable pointer, got %T", def)
+		return nil, newError(ErrInvalidPlugin, "plugin definition must be a comparable pointer, got %T", definition)
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if existing, ok := c.plugins[def]; ok {
+	if existing, ok := c.pluginRuntimes[definition]; ok {
 		return existing, nil
 	}
-	rt := &runtime{name: def.PluginName(), def: def}
-	c.plugins[def] = rt
-	return rt, nil
+	runtime := &pluginRuntime{name: definition.PluginName(), definition: definition}
+	c.pluginRuntimes[definition] = runtime
+	return runtime, nil
 }
 
 // injectDefinition backs Context.Inject.

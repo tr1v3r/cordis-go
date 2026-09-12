@@ -63,7 +63,7 @@ type Fiber struct {
 	// Ctx is the fiber's own context, passed to the plugin body.
 	Ctx *Context
 
-	runtime *runtime
+	runtime *pluginRuntime
 	inject  map[string]struct{}
 
 	mu        sync.Mutex
@@ -114,11 +114,11 @@ func newRootFiber(ctx *Context) *Fiber {
 	}
 }
 
-func newFiber(parentCtx *Context, rt *runtime, cfg any, inject map[string]struct{}) *Fiber {
+func newFiber(parentCtx *Context, runtime *pluginRuntime, cfg any, inject map[string]struct{}) *Fiber {
 	lifecycleCtx, cancel := context.WithCancel(parentCtx.fiber.lifecycleCtx)
 	fiber := &Fiber{
 		Parent:       parentCtx,
-		runtime:      rt,
+		runtime:      runtime,
 		inject:       inject,
 		rawConfig:    cfg,
 		state:        StatePending,
@@ -129,7 +129,7 @@ func newFiber(parentCtx *Context, rt *runtime, cfg any, inject map[string]struct
 		cancel:       cancel,
 	}
 	fiber.UID = parentCtx.shared.nextUID()
-	fiber.Ctx = parentCtx.Fork(rt.name)
+	fiber.Ctx = parentCtx.Fork(runtime.name)
 	fiber.Ctx.fiber = fiber
 
 	// The parent owns the child's lifetime: disposing the parent disposes every
@@ -146,7 +146,7 @@ func newFiber(parentCtx *Context, rt *runtime, cfg any, inject map[string]struct
 		fiber.parentDisposer = release
 		fiber.mu.Unlock()
 	}
-	parentCtx.shared.addFiber(rt, fiber)
+	parentCtx.shared.addFiber(runtime, fiber)
 	parentCtx.shared.bus.emitInternal("internal/plugin", &PluginEvent{Fiber: fiber})
 	fiber.refresh()
 	return fiber
@@ -439,7 +439,7 @@ func (f *Fiber) load() {
 	raw := f.rawConfig
 	f.mu.Unlock()
 
-	config, err := f.runtime.def.ResolveConfig(raw)
+	config, err := f.runtime.definition.ResolveConfig(raw)
 	if err != nil {
 		f.fail(err)
 		return
@@ -464,7 +464,7 @@ func (f *Fiber) run(config any) (err error) {
 			err = fmt.Errorf("panic in plugin %s: %v", f.Name(), reason)
 		}
 	}()
-	return f.runtime.def.Run(f.Ctx, config)
+	return f.runtime.definition.Run(f.Ctx, config)
 }
 
 func (f *Fiber) fail(err error) {
@@ -636,23 +636,23 @@ func (c *core) nextUID() int {
 	return c.counter
 }
 
-func (c *core) addFiber(rt *runtime, fiber *Fiber) {
+func (c *core) addFiber(runtime *pluginRuntime, fiber *Fiber) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	rt.fibers = append(rt.fibers, fiber)
+	runtime.fibers = append(runtime.fibers, fiber)
 }
 
-func (c *core) removeFiber(rt *runtime, fiber *Fiber) {
+func (c *core) removeFiber(runtime *pluginRuntime, fiber *Fiber) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	for i, candidate := range rt.fibers {
+	for i, candidate := range runtime.fibers {
 		if candidate == fiber {
-			rt.fibers = append(rt.fibers[:i], rt.fibers[i+1:]...)
+			runtime.fibers = append(runtime.fibers[:i], runtime.fibers[i+1:]...)
 			break
 		}
 	}
-	if len(rt.fibers) == 0 {
-		delete(c.plugins, rt.def)
+	if len(runtime.fibers) == 0 {
+		delete(c.pluginRuntimes, runtime.definition)
 	}
 }
 
@@ -661,8 +661,8 @@ func (c *core) snapshotFibers() []*Fiber {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	var fibers []*Fiber
-	for _, rt := range c.plugins {
-		fibers = append(fibers, rt.fibers...)
+	for _, runtime := range c.pluginRuntimes {
+		fibers = append(fibers, runtime.fibers...)
 	}
 	return fibers
 }

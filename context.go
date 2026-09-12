@@ -23,16 +23,16 @@ func WithLevel(level Level) Option {
 // core is the state shared by every context of one application. It is reached
 // through Context.Root() so that child contexts stay cheap to create.
 type core struct {
-	mu        sync.Mutex
-	store     map[string]*impl
-	plugins   map[Definition]*runtime
-	counter   int
-	scopeSeq  int
-	root      *Context
-	bus       *eventBus
-	log       *loggerService
-	logWriter io.Writer
-	logLevel  Level
+	mu             sync.Mutex
+	store          map[string]*impl
+	pluginRuntimes map[Definition]*pluginRuntime
+	counter        int
+	scopeSeq       int
+	root           *Context
+	bus            *eventBus
+	log            *loggerService
+	logWriter      io.Writer
+	logLevel       Level
 }
 
 // New creates a root context and installs the built-in services.
@@ -41,10 +41,10 @@ type core struct {
 // plugin fiber loaded beneath it.
 func New(opts ...Option) *Context {
 	appCore := &core{
-		store:     map[string]*impl{},
-		plugins:   map[Definition]*runtime{},
-		logWriter: io.Discard,
-		logLevel:  LevelInfo,
+		store:          map[string]*impl{},
+		pluginRuntimes: map[Definition]*pluginRuntime{},
+		logWriter:      io.Discard,
+		logLevel:       LevelInfo,
 	}
 	for _, opt := range opts {
 		opt(appCore)
@@ -342,15 +342,15 @@ type Registry struct {
 func (r *Registry) Size() int {
 	r.shared.mu.Lock()
 	defer r.shared.mu.Unlock()
-	return len(r.shared.plugins)
+	return len(r.shared.pluginRuntimes)
 }
 
 // Plugins returns the names of every plugin definition with live fibers.
 func (r *Registry) Plugins() []string {
 	r.shared.mu.Lock()
 	defer r.shared.mu.Unlock()
-	names := make([]string, 0, len(r.shared.plugins))
-	for def := range r.shared.plugins {
+	names := make([]string, 0, len(r.shared.pluginRuntimes))
+	for def := range r.shared.pluginRuntimes {
 		names = append(names, def.PluginName())
 	}
 	return names

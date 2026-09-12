@@ -139,107 +139,114 @@ func Strict() ComposeOption {
 	return func(o *composeOptions) { o.strict = true }
 }
 
+type treeComposer struct {
+	tree    *Tree
+	index   map[string]*Node
+	options composeOptions
+}
+
 // Compose applies layers in order and returns the resulting tree.
 //
 // Within a layer, an entry whose id matches an existing node patches it; an
 // entry carrying "insert" appends new nodes. Ids are matched across the whole
 // tree, so a nested group child can be patched by a later layer.
 func Compose(layers []Layer, opts ...ComposeOption) (*Tree, error) {
-	options := &composeOptions{}
+	composer := &treeComposer{
+		tree:  &Tree{},
+		index: map[string]*Node{},
+	}
 	for _, opt := range opts {
-		opt(options)
+		opt(&composer.options)
 	}
 
-	tree := &Tree{}
-	index := map[string]*Node{}
 	for _, layer := range layers {
-		tree.Layers = append(tree.Layers, layer.Label)
+		composer.tree.Layers = append(composer.tree.Layers, layer.Label)
 		for _, entry := range layer.Entries {
 			var err error
 			if layer.Patch {
-				err = applyPatch(tree, index, layer.Label, &tree.Nodes, entry, options)
+				err = composer.applyPatch(layer.Label, &composer.tree.Nodes, entry)
 			} else {
-				err = applyBase(tree, index, layer.Label, &tree.Nodes, entry)
+				err = composer.applyBase(layer.Label, &composer.tree.Nodes, entry)
 			}
 			if err != nil {
 				return nil, err
 			}
 		}
 	}
-	return tree, nil
+	return composer.tree, nil
 }
 
 // applyBase creates entries for a base layer.
-func applyBase(tree *Tree, index map[string]*Node, source string, siblings *[]*Node, entry *Patch) error {
+func (c *treeComposer) applyBase(source string, targetNodes *[]*Node, entry *Patch) error {
 	if entry == nil {
 		return nil
 	}
-	items := entry.Insert
-	if len(items) == 0 {
-		items = []*Patch{entry}
+	baseEntries := entry.Insert
+	if len(baseEntries) == 0 {
+		baseEntries = []*Patch{entry}
 	}
-	for _, item := range items {
-		if item == nil {
+	for _, baseEntry := range baseEntries {
+		if baseEntry == nil {
 			continue
 		}
-		if item.ID == "" && item.Name == nil {
+		if baseEntry.ID == "" && baseEntry.Name == nil {
 			return fmt.Errorf("layer %s: entry requires id or name", source)
 		}
-		if item.ID != "" {
-			if _, exists := index[item.ID]; exists {
-				return fmt.Errorf("layer %s: duplicate entry id %q", source, item.ID)
+		if baseEntry.ID != "" {
+			if _, exists := c.index[baseEntry.ID]; exists {
+				return fmt.Errorf("layer %s: duplicate entry id %q", source, baseEntry.ID)
 			}
 		}
-		node := createNode(item, source)
-		*siblings = append(*siblings, node)
-		indexNode(index, node)
+		node := createNode(baseEntry, source)
+		*targetNodes = append(*targetNodes, node)
+		c.indexNode(node)
 	}
 	return nil
 }
 
-func applyPatch(tree *Tree, index map[string]*Node, source string, siblings *[]*Node, patch *Patch, options *composeOptions) error {
+func (c *treeComposer) applyPatch(source string, targetNodes *[]*Node, patch *Patch) error {
 	if patch == nil {
 		return nil
 	}
 	if len(patch.Insert) > 0 {
-		for _, item := range patch.Insert {
-			if item == nil {
+		for _, insertedEntry := range patch.Insert {
+			if insertedEntry == nil {
 				continue
 			}
-			if item.ID == "" && item.Name == nil {
+			if insertedEntry.ID == "" && insertedEntry.Name == nil {
 				return fmt.Errorf("layer %s: inserted entry requires id or name", source)
 			}
-			if item.ID != "" {
-				if _, exists := index[item.ID]; exists {
-					message := fmt.Sprintf("layer %s: duplicate entry id %q", source, item.ID)
-					if options.strict {
+			if insertedEntry.ID != "" {
+				if _, exists := c.index[insertedEntry.ID]; exists {
+					message := fmt.Sprintf("layer %s: duplicate entry id %q", source, insertedEntry.ID)
+					if c.options.strict {
 						return fmt.Errorf("%s", message)
 					}
-					tree.Warnings = append(tree.Warnings, message)
+					c.tree.Warnings = append(c.tree.Warnings, message)
 					continue
 				}
 			}
-			node := createNode(item, source)
-			*siblings = append(*siblings, node)
-			indexNode(index, node)
+			node := createNode(insertedEntry, source)
+			*targetNodes = append(*targetNodes, node)
+			c.indexNode(node)
 		}
 		return nil
 	}
 	if patch.ID == "" {
 		return fmt.Errorf("layer %s: entry requires id or insert", source)
 	}
-	node, ok := index[patch.ID]
+	node, ok := c.index[patch.ID]
 	if !ok {
 		message := fmt.Sprintf("layer %s: patch id %q matched no entry", source, patch.ID)
-		if options.strict {
+		if c.options.strict {
 			return fmt.Errorf("%s", message)
 		}
-		tree.Warnings = append(tree.Warnings, message)
+		c.tree.Warnings = append(c.tree.Warnings, message)
 		return nil
 	}
 	mergePatch(node, patch, source)
-	for _, child := range patch.Plugins {
-		if err := applyPatch(tree, index, source, &node.Children, child, options); err != nil {
+	for _, childPatch := range patch.Plugins {
+		if err := c.applyPatch(source, &node.Children, childPatch); err != nil {
 			return err
 		}
 	}
@@ -300,15 +307,15 @@ func mergePatch(node *Node, patch *Patch, source string) {
 
 // indexNode registers a node and all of its descendants in the global id
 // index, so a later layer can patch a nested group child by id.
-func indexNode(index map[string]*Node, node *Node) {
+func (c *treeComposer) indexNode(node *Node) {
 	if node == nil {
 		return
 	}
 	if node.ID != "" {
-		index[node.ID] = node
+		c.index[node.ID] = node
 	}
 	for _, child := range node.Children {
-		indexNode(index, child)
+		c.indexNode(child)
 	}
 }
 
