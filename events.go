@@ -58,7 +58,7 @@ func WithOnce() EventOption {
 }
 
 // On registers a typed listener owned by the context's fiber.
-func On[E any](c *Context, name string, fn func(E), opts ...EventOption) Disposer {
+func (c *Context) On[E any](name string, fn func(E), opts ...EventOption) Disposer {
 	return c.on(name, func(payload any, _ func(any) any) any {
 		fn(assertPayload[E](name, payload))
 		return nil
@@ -66,16 +66,16 @@ func On[E any](c *Context, name string, fn func(E), opts ...EventOption) Dispose
 }
 
 // OnOnce registers a typed listener that runs at most once.
-func OnOnce[E any](c *Context, name string, fn func(E), opts ...EventOption) Disposer {
+func (c *Context) OnOnce[E any](name string, fn func(E), opts ...EventOption) Disposer {
 	// Copy: appending to the caller's slice in place could overwrite a
 	// subsequent option they intend to reuse.
 	options := append(append([]EventOption(nil), opts...), WithOnce())
-	return On(c, name, fn, options...)
+	return c.On(name, fn, options...)
 }
 
 // OnValue registers a typed listener whose return value participates in Bail
 // and Serial. A non-nil, non-false return value bails the dispatch.
-func OnValue[E any](c *Context, name string, fn func(E) any, opts ...EventOption) Disposer {
+func (c *Context) OnValue[E any](name string, fn func(E) any, opts ...EventOption) Disposer {
 	return c.on(name, func(payload any, _ func(any) any) any {
 		return fn(assertPayload[E](name, payload))
 	}, opts...)
@@ -83,7 +83,7 @@ func OnValue[E any](c *Context, name string, fn func(E) any, opts ...EventOption
 
 // OnWaterfall registers a listener that wraps the rest of a Waterfall chain.
 // Calling next continues the chain; not calling it vetoes the remainder.
-func OnWaterfall[E any](c *Context, name string, fn func(E, func(E) any) any,
+func (c *Context) OnWaterfall[E any](name string, fn func(E, func(E) any) any,
 	opts ...EventOption) Disposer {
 	return c.on(name, func(payload any, next func(any) any) any {
 		return fn(assertPayload[E](name, payload), func(value E) any { return next(value) })
@@ -97,14 +97,6 @@ func assertPayload[E any](name string, payload any) E {
 		panic(fmt.Sprintf("event %q: payload has type %T, want %T", name, payload, zero))
 	}
 	return value
-}
-
-// On registers an untyped listener owned by the context's fiber.
-func (c *Context) On(name string, fn func(payload any), opts ...EventOption) Disposer {
-	return c.on(name, func(payload any, _ func(any) any) any {
-		fn(payload)
-		return nil
-	}, opts...)
 }
 
 func (c *Context) on(name string, fn func(any, func(any) any) any, opts ...EventOption) Disposer {
@@ -346,6 +338,27 @@ func waterfallWith[E any](c *Context, name string, payload E, final func(E) any,
 }
 
 // Function forms of the Context methods above.
+
+// On is the function form of Context.On.
+func On[E any](c *Context, name string, fn func(E), opts ...EventOption) Disposer {
+	return c.On(name, fn, opts...)
+}
+
+// OnOnce is the function form of Context.OnOnce.
+func OnOnce[E any](c *Context, name string, fn func(E), opts ...EventOption) Disposer {
+	return c.OnOnce(name, fn, opts...)
+}
+
+// OnValue is the function form of Context.OnValue.
+func OnValue[E any](c *Context, name string, fn func(E) any, opts ...EventOption) Disposer {
+	return c.OnValue(name, fn, opts...)
+}
+
+// OnWaterfall is the function form of Context.OnWaterfall.
+func OnWaterfall[E any](c *Context, name string, fn func(E, func(E) any) any,
+	opts ...EventOption) Disposer {
+	return c.OnWaterfall(name, fn, opts...)
+}
 
 // Emit is the function form of Context.Emit.
 func Emit[E any](c *Context, name string, payload E) {

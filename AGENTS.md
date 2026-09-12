@@ -30,9 +30,9 @@ make fmt     # 也可以单跑某一环：make fmt / vet / lint / test
 - **泛型入口成对出现**：Context 方法 + 等价包级函数（`ctx.Emit` / `cordis.Emit`、`ctx.Load` /
   `cordis.Load`）。包级函数不是历史包袱——泛型方法必须先实例化才能当方法值，它是唯一通道。
   完整约定写在 `doc.go`。
-- **这些名字没有方法形态**：`On[E]` / `OnOnce[E]` / `OnValue[E]` / `OnWaterfall[E]` / `Get[T]` /
-  `Provide[T]` / `ProvideChecked[T]`。原因是 `Context` 上同名**非泛型**方法已存在，而 Go 不允许
-  泛型方法与非泛型方法同名。给某个操作加方法前，先确认 `Context` 上没有同名方法。
+- **这些名字没有方法形态**：`Get[T]` / `Provide[T]` / `ProvideChecked[T]`。原因是 `Context` 上
+  同名**非泛型**方法已存在（运行期按名字取服务是刚需），而 Go 不允许泛型方法与非泛型方法同名
+  ——方法集一个名字只能有一个方法。给某个操作加方法形态前，先确认 `Context` 上没有同名方法。
 - **运行期才知道插件类型的宿主**（参考 `loader`）：在**注册时**用闭包固定类型参数
   （`Register[C]` 里把 `load` 闭包建好），运行期只调那个闭包。不要在加载时尝试擦除类型。
 - **同一 definition 加载两次 = 一个 runtime、两个 fiber**：`runtime` 按 definition 指针身份索引，

@@ -18,26 +18,26 @@ func main() {
 	root := cordis.New()
 
 	// -------------------------------------------------------- two spellings --
-	// Dispatch (Emit/Bail/Serial/Parallel/Waterfall and each *Scoped variant) is
-	// a Context method; the package-level function of the same name forwards to
-	// it and behaves identically:
+	// Registration and dispatch are both Context methods; the package-level
+	// function of the same name forwards to it and behaves identically:
 	//
-	//	root.Emit("tick", t)            // method form (preferred)
-	//	cordis.Emit(root, "tick", t)    // function form, context passed first
+	//	root.On("tick", func(t tick) { ... })   // method form (preferred)
+	//	cordis.On(root, "tick", ...)            // function form, context first
+	//	root.Emit("tick", t)
+	//	cordis.Emit(root, "tick", t)
 	//
-	// Registration has no method form: Context.On is taken by the untyped
-	// listener (payload any), and Go does not let a generic method share a name
-	// with a non-generic one, so On/OnValue/OnWaterfall stay package-level.
-	section("0. dispatch = ctx method, registration = package function")
-	cordis.On(root, "greet", func(s string) { fmt.Println("  got:", s) })
-	root.Emit("greet", "method form")           // method form
-	cordis.Emit(root, "greet", "function form") // function form, equivalent
+	// Keep the function form for values: a generic method has to be instantiated
+	// before it can be passed around.
+	section("0. registration and dispatch are both ctx methods")
+	root.On("greet", func(s string) { fmt.Println("  got:", s) }) // method form
+	root.Emit("greet", "method form")                             // method form
+	cordis.Emit(root, "greet", "function form")                   // function form, equivalent
 
 	// ----------------------------------------------------------------- Emit --
 	// Broadcast: every listener runs synchronously, return values are ignored.
 	section("1. Emit — broadcast, return values ignored")
-	cordis.On(root, "tick", func(t tick) { fmt.Printf("  A saw tick %d\n", t.n) })
-	cordis.On(root, "tick", func(t tick) { fmt.Printf("  B saw tick %d\n", t.n) })
+	root.On("tick", func(t tick) { fmt.Printf("  A saw tick %d\n", t.n) })
+	root.On("tick", func(t tick) { fmt.Printf("  B saw tick %d\n", t.n) })
 	root.Emit("tick", tick{n: 1})
 
 	// ----------------------------------------------------------- EmitScoped --
@@ -48,11 +48,11 @@ func main() {
 	cn2 := root.IsolateShared("region", "cn")
 	us := root.IsolateShared("region", "us")
 
-	cordis.On(cn1, "beat", func(s string) { fmt.Println("  cn1 got", s) })
-	cordis.On(cn2, "beat", func(s string) { fmt.Println("  cn2 got", s) })
-	cordis.On(us, "beat", func(s string) { fmt.Println("  us  got", s) })
-	cordis.On(root, "beat", func(s string) { fmt.Println("  root got", s) })
-	cordis.On(root, "beat", func(s string) { fmt.Println("  GLOBAL got", s) }, cordis.Global())
+	cn1.On("beat", func(s string) { fmt.Println("  cn1 got", s) })
+	cn2.On("beat", func(s string) { fmt.Println("  cn2 got", s) })
+	us.On("beat", func(s string) { fmt.Println("  us  got", s) })
+	root.On("beat", func(s string) { fmt.Println("  root got", s) })
+	root.On("beat", func(s string) { fmt.Println("  GLOBAL got", s) }, cordis.Global())
 
 	cn1.EmitScoped("region", "beat", "hello-cn") // cn2 shares the label; Global always hears it
 	fmt.Println("  -- an unscoped Emit reaches everyone --")
@@ -62,14 +62,14 @@ func main() {
 	// Sequential: the first listener returning non-nil / non-false wins and
 	// stops the dispatch.
 	section("3. Bail — first hit wins")
-	cordis.OnValue(root, "ask", func(a ask) any {
+	root.OnValue("ask", func(a ask) any {
 		if a.q == "cache" {
 			return "hit:from-cache"
 		}
 		return nil // abstain, let the next listener answer
 	})
-	cordis.OnValue(root, "ask", func(a ask) any { return "fallback:" + a.q })
-	cordis.OnValue(root, "ask", func(ask) any { return "never-reached" })
+	root.OnValue("ask", func(a ask) any { return "fallback:" + a.q })
+	root.OnValue("ask", func(ask) any { return "never-reached" })
 
 	// function form: cordis.Bail(root, "ask", ...)
 	value, bailed := root.Bail("ask", ask{q: "cache"})
@@ -81,9 +81,9 @@ func main() {
 	section("4. BailScoped — scoped bail")
 	left := root.Isolate("db")
 	right := root.Isolate("db")
-	cordis.OnValue(left, "pick", func(string) any { return "left" })
-	cordis.OnValue(right, "pick", func(string) any { return "right" })
-	cordis.OnValue(root, "pick", func(string) any { return "root" })
+	left.OnValue("pick", func(string) any { return "left" })
+	right.OnValue("pick", func(string) any { return "right" })
+	root.OnValue("pick", func(string) any { return "root" })
 	value, _ = left.BailScoped("db", "pick", "x")
 	fmt.Println("  BailScoped(left)  ->", value)
 	value, _ = right.BailScoped("db", "pick", "x")
@@ -100,9 +100,9 @@ func main() {
 	// One goroutine per listener; panics are collected and joined into the
 	// returned error.
 	section("6. Parallel — concurrent, errors joined")
-	cordis.On(root, "job", func(string) { time.Sleep(60 * time.Millisecond) })
-	cordis.On(root, "job", func(string) { time.Sleep(30 * time.Millisecond) })
-	cordis.On(root, "job", func(string) { panic("worker C died") })
+	root.On("job", func(string) { time.Sleep(60 * time.Millisecond) })
+	root.On("job", func(string) { time.Sleep(30 * time.Millisecond) })
+	root.On("job", func(string) { panic("worker C died") })
 
 	start := time.Now()
 	err := root.Parallel("job", "x")
@@ -112,9 +112,9 @@ func main() {
 	// ------------------------------------------------------- ParallelScoped --
 	section("7. ParallelScoped — scoped concurrency")
 	scoped := root.Isolate("worker")
-	cordis.On(scoped, "fan", func(string) { time.Sleep(20 * time.Millisecond) })
-	cordis.On(scoped, "fan", func(string) { panic("scoped worker died") })
-	cordis.On(root, "fan", func(string) {
+	scoped.On("fan", func(string) { time.Sleep(20 * time.Millisecond) })
+	scoped.On("fan", func(string) { panic("scoped worker died") })
+	root.On("fan", func(string) {
 		fmt.Println("  this one is in the root scope, so Scoped skips it")
 	})
 	err = scoped.ParallelScoped("worker", "fan", "x")
@@ -124,17 +124,17 @@ func main() {
 	// Onion model: a listener calls next to continue inward, and skipping next
 	// vetoes the rest; the outermost return value wins.
 	section("8. Waterfall — middleware chain")
-	cordis.OnWaterfall(root, "render", func(s string, next func(string) any) any {
+	root.OnWaterfall("render", func(s string, next func(string) any) any {
 		return "auth(" + next(s+"+auth").(string) + ")" // act, then descend
 	})
-	cordis.OnWaterfall(root, "render", func(s string, next func(string) any) any {
+	root.OnWaterfall("render", func(s string, next func(string) any) any {
 		return "log(" + next(s+"+log").(string) + ")"
 	})
 	final := func(s string) any { return "core:" + s }
 	fmt.Println("  ", root.Waterfall("render", "req", final))
 
 	// Not calling next vetoes both the remaining listeners and final.
-	cordis.OnWaterfall(root, "veto", func(s string, _ func(string) any) any {
+	root.OnWaterfall("veto", func(s string, _ func(string) any) any {
 		return "rejected:" + s
 	})
 	fmt.Println("  veto:", root.Waterfall("veto", "req", final))
@@ -143,10 +143,10 @@ func main() {
 	section("9. WaterfallScoped — scoped middleware chain")
 	scopedLeft := root.IsolateShared("mw", "a")
 	scopedRight := root.IsolateShared("mw", "b")
-	cordis.OnWaterfall(scopedLeft, "pipe", func(s string, next func(string) any) any {
+	scopedLeft.OnWaterfall("pipe", func(s string, next func(string) any) any {
 		return "L[" + next(s).(string) + "]"
 	})
-	cordis.OnWaterfall(scopedRight, "pipe", func(s string, next func(string) any) any {
+	scopedRight.OnWaterfall("pipe", func(s string, next func(string) any) any {
 		return "R[" + next(s).(string) + "]"
 	})
 	fmt.Println("  ", scopedLeft.WaterfallScoped("mw", "pipe", "x", final))
@@ -154,12 +154,12 @@ func main() {
 
 	// ------------------------------------------------- registration helpers --
 	section("10. registration helpers: OnOnce / Prepend / Global")
-	cordis.OnOnce(root, "once", func(string) { fmt.Println("  once listener ran") })
+	root.OnOnce("once", func(string) { fmt.Println("  once listener ran") })
 	root.Emit("once", "a")
 	root.Emit("once", "b") // no longer fires
 
-	cordis.On(root, "order", func(string) { fmt.Println("  second (appended)") })
-	cordis.On(root, "order", func(string) {
+	root.On("order", func(string) { fmt.Println("  second (appended)") })
+	root.On("order", func(string) {
 		fmt.Println("  first  (Prepend moves it to the front)")
 	}, cordis.Prepend())
 	root.Emit("order", "x")
@@ -167,8 +167,8 @@ func main() {
 	// A panicking listener does not interrupt the others; it is logged, and
 	// Parallel reports it through the returned error.
 	section("11. panicking listener isolation")
-	cordis.On(root, "safe", func(string) { panic("boom") })
-	cordis.On(root, "safe", func(string) {
+	root.On("safe", func(string) { panic("boom") })
+	root.On("safe", func(string) {
 		fmt.Println("  still runs: Emit logs the panic and continues")
 	})
 	root.Emit("safe", "x")
