@@ -20,19 +20,21 @@ type consumerConfig struct {
 	Label string
 }
 
-var databasePlugin = cordis.Define("database-provider", func(ctx *cordis.Context, cfg databaseConfig) error {
-	_, err := cordis.Provide(ctx, "db", &database{label: cfg.Label})
-	return err
-})
+var databasePlugin = cordis.Define("database-provider",
+	func(ctx *cordis.Context, cfg databaseConfig) error {
+		_, err := cordis.Provide(ctx, "db", &database{label: cfg.Label})
+		return err
+	})
 
-var consumerPlugin = cordis.Define("database-consumer", func(ctx *cordis.Context, cfg consumerConfig) error {
-	db, ok := cordis.Get[*database](ctx, "db")
-	if !ok {
-		return fmt.Errorf("db service unavailable")
-	}
-	fmt.Printf("%-18s uses %s\n", cfg.Label, db.label)
-	return nil
-}).WithInject("db")
+var consumerPlugin = cordis.Define("database-consumer",
+	func(ctx *cordis.Context, cfg consumerConfig) error {
+		db, ok := cordis.Get[*database](ctx, "db")
+		if !ok {
+			return fmt.Errorf("db service unavailable")
+		}
+		fmt.Printf("%-18s uses %s\n", cfg.Label, db.label)
+		return nil
+	}).WithInject("db")
 
 func main() {
 	rootCtx := cordis.New()
@@ -49,7 +51,8 @@ func main() {
 
 	// A consumer loaded before its isolated provider waits in Pending. Publishing
 	// "db" in the same isolated Context activates it synchronously.
-	tenantAConsumer := mustLoad(tenantACtx, consumerPlugin, consumerConfig{Label: "tenant-a consumer"})
+	tenantAConsumer := mustLoad(tenantACtx, consumerPlugin,
+		consumerConfig{Label: "tenant-a consumer"})
 	fmt.Printf("tenant-a before provider: %s\n", tenantAConsumer.State())
 	mustLoad(tenantACtx, databasePlugin, databaseConfig{Label: "tenant-a-db"})
 	fmt.Printf("tenant-a after provider:  %s\n", tenantAConsumer.State())

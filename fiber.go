@@ -26,6 +26,7 @@ const (
 	StateDisposed
 )
 
+// String returns the state's lowercase name.
 func (s FiberState) String() string {
 	switch s {
 	case StatePending:
@@ -250,7 +251,8 @@ func (f *Fiber) tryEffect(label string, body func() Disposer) (Disposer, error) 
 	f.mu.Lock()
 	if f.disposed || f.state == StateUnloading {
 		f.mu.Unlock()
-		return nil, newError(ErrInactiveEffect, "cannot create effect on inactive context %q", f.Name())
+		return nil, newError(ErrInactiveEffect,
+			"cannot create effect on inactive context %q", f.Name())
 	}
 	entry := &effectEntry{meta: &EffectMeta{Label: label}}
 	parentEffect := f.current
@@ -321,7 +323,8 @@ func (f *Fiber) runDisposer(entry *effectEntry) {
 func (f *Fiber) callDisposer(entry *effectEntry, dispose Disposer) {
 	defer func() {
 		if reason := recover(); reason != nil {
-			f.shared().log.errorf("cordis: panic while disposing %s of plugin %s: %v", entry.meta.Label, f.Name(), reason)
+			f.shared().log.errorf("cordis: panic while disposing %s of plugin %s: %v",
+				entry.meta.Label, f.Name(), reason)
 		}
 	}()
 	dispose()

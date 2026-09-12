@@ -28,6 +28,7 @@ type Error struct {
 	Msg  string
 }
 
+// Error implements the error interface, rendering the code and message.
 func (e *Error) Error() string {
 	if e.Msg == "" {
 		return string(e.Code)

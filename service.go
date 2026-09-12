@@ -12,7 +12,8 @@ type serviceBinding struct {
 	availabilityCheck func() bool
 }
 
-func provide(c *Context, name string, service any, availabilityCheck func() bool) (Disposer, error) {
+func provide(c *Context, name string, service any,
+	availabilityCheck func() bool) (Disposer, error) {
 	if name == "" {
 		return nil, newError(ErrServiceMissing, "service name must not be empty")
 	}
@@ -32,7 +33,8 @@ func provide(c *Context, name string, service any, availabilityCheck func() bool
 	inactive := ownerFiber.disposed || ownerFiber.state == StateUnloading
 	ownerFiber.mu.Unlock()
 	if inactive {
-		return nil, newError(ErrInactiveEffect, "cannot provide service %q on inactive context %q", name, ownerFiber.Name())
+		return nil, newError(ErrInactiveEffect,
+			"cannot provide service %q on inactive context %q", name, ownerFiber.Name())
 	}
 	if err := c.shared.registerService(binding); err != nil {
 		return nil, err
@@ -91,7 +93,8 @@ func (c *core) registerService(binding *serviceBinding) error {
 		if existing.provider != nil {
 			owner = existing.provider.Name()
 		}
-		return newError(ErrServiceExists, "service %q is already provided by <%s>", binding.name, owner)
+		return newError(ErrServiceExists,
+			"service %q is already provided by <%s>", binding.name, owner)
 	}
 	c.serviceBindings[binding.scopeLabel] = binding
 	return nil

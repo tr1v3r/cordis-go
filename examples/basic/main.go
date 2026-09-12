@@ -49,31 +49,33 @@ func main() {
 
 	// Registry names select plugin definitions from config; they are independent
 	// from the diagnostic plugin names and the services those plugins provide.
-	loader.MustRegister(registry, "database-module", cordis.Define("database-provider", func(ctx *cordis.Context, cfg dbConfig) error {
-		database := &DB{path: cfg.Path}
-		if _, err := cordis.Serve(ctx, "db", database); err != nil {
-			return err
-		}
-		ctx.Logger().Info("db ready at %s", cfg.Path)
-		return nil
-	}))
+	loader.MustRegister(registry, "database-module",
+		cordis.Define("database-provider", func(ctx *cordis.Context, cfg dbConfig) error {
+			database := &DB{path: cfg.Path}
+			if _, err := cordis.Serve(ctx, "db", database); err != nil {
+				return err
+			}
+			ctx.Logger().Info("db ready at %s", cfg.Path)
+			return nil
+		}))
 
-	loader.MustRegister(registry, "http-module", cordis.Define("http-server", func(ctx *cordis.Context, cfg serverConfig) error {
-		// The db dependency is declared below via WithInject, so this plugin only
-		// runs once the db service exists.
-		database, ok := cordis.Get[*DB](ctx, "db")
-		if !ok {
-			return fmt.Errorf("db service unavailable")
-		}
-		server := &Server{addr: cfg.Addr}
-		if _, err := cordis.Serve(ctx, "server", server); err != nil {
-			return err
-		}
-		cordis.On(ctx, "ping", func(ping *Ping) {
-			ctx.Logger().Info("%s -> %s (db=%s)", ping.From, server.addr, database.path)
-		})
-		return nil
-	}).WithInject("db"))
+	loader.MustRegister(registry, "http-module",
+		cordis.Define("http-server", func(ctx *cordis.Context, cfg serverConfig) error {
+			// The db dependency is declared below via WithInject, so this plugin only
+			// runs once the db service exists.
+			database, ok := cordis.Get[*DB](ctx, "db")
+			if !ok {
+				return fmt.Errorf("db service unavailable")
+			}
+			server := &Server{addr: cfg.Addr}
+			if _, err := cordis.Serve(ctx, "server", server); err != nil {
+				return err
+			}
+			cordis.On(ctx, "ping", func(ping *Ping) {
+				ctx.Logger().Info("%s -> %s (db=%s)", ping.From, server.addr, database.path)
+			})
+			return nil
+		}).WithInject("db"))
 
 	base, err := loader.ParseLayer("base", []byte(baseLayer))
 	must(err)
@@ -100,10 +102,11 @@ func main() {
 
 	// A plugin that needs a service nobody provides stays pending instead of
 	// failing; it activates as soon as the service appears.
-	cacheConsumerFiber, err := rootCtx.Load(cordis.Define("cache-consumer", func(ctx *cordis.Context, _ struct{}) error {
-		ctx.Logger().Info("cache consumer started")
-		return nil
-	}).WithInject("cache"), struct{}{})
+	cacheConsumerFiber, err := rootCtx.Load(
+		cordis.Define("cache-consumer", func(ctx *cordis.Context, _ struct{}) error {
+			ctx.Logger().Info("cache consumer started")
+			return nil
+		}).WithInject("cache"), struct{}{})
 	must(err)
 	fmt.Printf("fiber %-14s state=%s\n", cacheConsumerFiber.Name(), cacheConsumerFiber.State())
 	if _, err := rootCtx.Provide("cache", &DB{path: "cache.db"}); err != nil {

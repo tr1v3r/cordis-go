@@ -180,12 +180,6 @@ func (l *disposableList) snapshot() []*effectEntry {
 	return entries
 }
 
-func (l *disposableList) len() int {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return len(l.items)
-}
-
 // clear empties the list and returns the entries newest-first, which is the
 // order Cordis uses to unwind a fiber.
 func (l *disposableList) clear() []*effectEntry {

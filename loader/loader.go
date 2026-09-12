@@ -218,7 +218,8 @@ func (c *treeComposer) applyPatch(source string, targetNodes *[]*Node, patch *Pa
 			}
 			if insertedEntry.ID != "" {
 				if _, exists := c.index[insertedEntry.ID]; exists {
-					message := fmt.Sprintf("layer %s: duplicate entry id %q", source, insertedEntry.ID)
+					message := fmt.Sprintf("layer %s: duplicate entry id %q",
+						source, insertedEntry.ID)
 					if c.options.strict {
 						return fmt.Errorf("%s", message)
 					}
@@ -391,7 +392,8 @@ func Register[C any](registry *Registry, name string, plugin *cordis.Plugin[C]) 
 		return fmt.Errorf("loader: plugin %q is already registered", name)
 	}
 	registry.plugins[name] = &registeredPlugin{
-		load: func(ctx *cordis.Context, config map[string]any, extra []string) (*cordis.Fiber, error) {
+		load: func(ctx *cordis.Context, config map[string]any,
+			extra []string) (*cordis.Fiber, error) {
 			typed, err := decodeConfig[C](config)
 			if err != nil {
 				return nil, err
@@ -474,7 +476,8 @@ func (t *Tree) Load(ctx *cordis.Context, registry *Registry) ([]*cordis.Fiber, e
 	return fibers, nil
 }
 
-func (t *Tree) loadNodes(ctx *cordis.Context, registry *Registry, nodes []*Node, inherited []string, fibers *[]*cordis.Fiber) error {
+func (t *Tree) loadNodes(ctx *cordis.Context, registry *Registry, nodes []*Node,
+	inherited []string, fibers *[]*cordis.Fiber) error {
 	for _, node := range nodes {
 		if node == nil || node.Disabled {
 			continue
@@ -490,7 +493,8 @@ func (t *Tree) loadNodes(ctx *cordis.Context, registry *Registry, nodes []*Node,
 			if label == "" {
 				label = "group"
 			}
-			if err := t.loadNodes(ctx.Fork(label), registry, node.Children, deps, fibers); err != nil {
+			if err := t.loadNodes(ctx.Fork(label), registry, node.Children,
+				deps, fibers); err != nil {
 				return err
 			}
 			continue
