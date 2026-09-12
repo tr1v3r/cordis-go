@@ -63,7 +63,7 @@ type Fiber struct {
 	// Ctx is the fiber's own context, passed to the plugin body.
 	Ctx *Context
 
-	runtime *pluginRuntime
+	runtime *runtime
 	inject  map[string]struct{}
 
 	mu               sync.Mutex
@@ -114,7 +114,7 @@ func newRootFiber(ctx *Context) *Fiber {
 	}
 }
 
-func newFiber(parentCtx *Context, runtime *pluginRuntime, cfg any, inject map[string]struct{}) *Fiber {
+func newFiber(parentCtx *Context, runtime *runtime, cfg any, inject map[string]struct{}) *Fiber {
 	lifecycleCtx, cancel := context.WithCancel(parentCtx.fiber.lifecycleCtx)
 	fiber := &Fiber{
 		Parent:       parentCtx,
@@ -636,13 +636,13 @@ func (c *core) nextUID() int {
 	return c.counter
 }
 
-func (c *core) addFiber(runtime *pluginRuntime, fiber *Fiber) {
+func (c *core) addFiber(runtime *runtime, fiber *Fiber) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	runtime.fibers = append(runtime.fibers, fiber)
 }
 
-func (c *core) removeFiber(runtime *pluginRuntime, fiber *Fiber) {
+func (c *core) removeFiber(runtime *runtime, fiber *Fiber) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	for i, candidate := range runtime.fibers {
@@ -652,7 +652,7 @@ func (c *core) removeFiber(runtime *pluginRuntime, fiber *Fiber) {
 		}
 	}
 	if len(runtime.fibers) == 0 {
-		delete(c.pluginRuntimes, runtime.definition)
+		delete(c.runtimes, runtime.definition)
 	}
 }
 
@@ -661,7 +661,7 @@ func (c *core) snapshotFibers() []*Fiber {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	var fibers []*Fiber
-	for _, runtime := range c.pluginRuntimes {
+	for _, runtime := range c.runtimes {
 		fibers = append(fibers, runtime.fibers...)
 	}
 	return fibers
