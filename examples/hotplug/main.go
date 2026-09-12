@@ -11,11 +11,14 @@ import (
 	cordis "github.com/tr1v3r/cordis-go"
 )
 
+// Greeter is the service the client consumes; the demo swaps implementations
+// of it while the application keeps running.
 type Greeter interface {
 	Version() string
 	Greet(string) string
 }
 
+// greeter is one Greeter implementation, built from a version and a greeting.
 type greeter struct {
 	version string
 	greet   func(string) string
@@ -24,6 +27,7 @@ type greeter struct {
 func (g *greeter) Version() string          { return g.version }
 func (g *greeter) Greet(name string) string { return g.greet(name) }
 
+// greetRequest is the event payload the client plugin answers.
 type greetRequest struct {
 	Name string
 }
@@ -40,7 +44,7 @@ func main() {
 			greeter := cordis.MustGet[Greeter](ctx, "greeter")
 			fmt.Printf("client activation #%d uses %s\n", activation, greeter.Version())
 
-			cordis.OnValue[greetRequest](ctx, "greet", func(request greetRequest) any {
+			ctx.OnValue("greet", func(request greetRequest) any {
 				return greeter.Greet(request.Name)
 			})
 			ctx.OnDispose(func() {
@@ -55,8 +59,8 @@ func main() {
 	})
 
 	fmt.Println("== initial registration ==")
-	legacyFiber := mustLoad(cordis.Load(rootCtx, legacyPlugin, struct{}{}))
-	clientFiber := mustLoad(cordis.Load(rootCtx, clientPlugin, struct{}{}))
+	legacyFiber := mustLoad(rootCtx.Load(legacyPlugin, struct{}{}))
+	clientFiber := mustLoad(rootCtx.Load(clientPlugin, struct{}{}))
 	printState(legacyFiber, clientFiber, registry)
 	requestGreeting(rootCtx, "Cordis")
 
@@ -73,7 +77,7 @@ func main() {
 	})
 
 	fmt.Println("\n== register a replacement plugin ==")
-	replacementFiber := mustLoad(cordis.Load(rootCtx, replacementPlugin, struct{}{}))
+	replacementFiber := mustLoad(rootCtx.Load(replacementPlugin, struct{}{}))
 	printState(replacementFiber, clientFiber, registry)
 	requestGreeting(rootCtx, "Cordis")
 
@@ -88,7 +92,7 @@ func newGreeterPlugin(name string, service Greeter) *cordis.Plugin[struct{}] {
 }
 
 func requestGreeting(ctx *cordis.Context, name string) {
-	result, handled := cordis.Bail(ctx, "greet", greetRequest{Name: name})
+	result, handled := ctx.Bail("greet", greetRequest{Name: name})
 	if !handled {
 		fmt.Printf("request %q -> unavailable\n", name)
 		return

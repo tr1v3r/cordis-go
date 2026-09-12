@@ -230,14 +230,21 @@ go test ./...
 go run ./examples/basic
 go run ./examples/events
 go run ./examples/hotplug
+go run ./examples/isolation
+go run ./examples/serviceprobe
+go run ./examples/walkthrough
 go run ./cmd/cordis dump base.json profile.json
 ```
 
-`examples/basic` 演示了配置层叠加与 dump、依赖注入、事件、插件挂起与激活、卸载回收。
+`examples/basic` 演示配置层叠加与 dump、依赖注入、事件、插件挂起与激活、卸载回收。
 `examples/events` 逐一演示 `Emit` / `Bail` / `Serial` / `Parallel` / `Waterfall` 五种分发
-模式及各自的 `*Scoped` 变体（方法形态），附 `OnOnce` / `Prepend` / `Global` 与 panic 隔离。
+模式及各自的 `*Scoped` 变体，附 `OnOnce` / `Prepend` / `Global` 与 panic 隔离。
 `examples/hotplug` 演示应用持续运行时 provider 插件消失，依赖方进入 `pending`，再注册一个
 提供同名服务的新插件后依赖方自动恢复。
+`examples/isolation` 演示默认、隔离与显式共享三种服务作用域。
+`examples/serviceprobe` 是服务容器的行为探针：自提供服务可见性、同名冲突、依赖方跟随 provider
+状态、`Set` 语义、可用性谓词与 `Serve` 生命周期钩子。
+`examples/walkthrough` 打印 effect 树的卸载顺序（LIFO）。
 
 ## 开发
 
