@@ -124,19 +124,6 @@ func (c *Context) LoadWithInject[C any](plugin *Plugin[C], config C,
 	return load(c, plugin, config, extra)
 }
 
-// Function forms of the Context methods above.
-
-// Load is the function form of Context.Load.
-func Load[C any](parentCtx *Context, plugin *Plugin[C], config C) (*Fiber, error) {
-	return parentCtx.Load(plugin, config)
-}
-
-// LoadWithInject is the function form of Context.LoadWithInject.
-func LoadWithInject[C any](parentCtx *Context, plugin *Plugin[C], config C,
-	extra ...string) (*Fiber, error) {
-	return parentCtx.LoadWithInject(plugin, config, extra...)
-}
-
 func load(parentCtx *Context, definition definition, config any, extra []string) (*Fiber, error) {
 	if definition == nil {
 		return nil, newError(ErrInvalidPlugin, "nil plugin definition")

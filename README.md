@@ -289,6 +289,7 @@ cordis-go/
 ├── events.go             # 事件总线与五种分发模式
 ├── logger.go             # 轻量日志服务
 ├── disposable.go         # 幂等 Disposer 与 effect 列表
+├── funcforms.go          # 包级函数形态：转发到同名 Context 方法
 ├── Makefile              # fmt / vet / lint / test / ci 入口
 ├── .revive.toml          # 风格规则：revive 默认集 + 100 列行宽
 ├── .github/workflows/    # CI：Go 1.27，跑 make ci
