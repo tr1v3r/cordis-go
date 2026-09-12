@@ -83,7 +83,8 @@ func OnValue[E any](c *Context, name string, fn func(E) any, opts ...EventOption
 
 // OnWaterfall registers a listener that wraps the rest of a Waterfall chain.
 // Calling next continues the chain; not calling it vetoes the remainder.
-func OnWaterfall[E any](c *Context, name string, fn func(E, func(E) any) any, opts ...EventOption) Disposer {
+func OnWaterfall[E any](c *Context, name string, fn func(E, func(E) any) any,
+	opts ...EventOption) Disposer {
 	return c.on(name, func(payload any, next func(any) any) any {
 		return fn(assertPayload[E](name, payload), func(value E) any { return next(value) })
 	}, opts...)
@@ -215,13 +216,13 @@ func (c *Context) scopeFilter(scopeName string) func(*eventListener) bool {
 }
 
 // Emit dispatches an event synchronously and ignores listener return values.
-func Emit[E any](c *Context, name string, payload E) {
+func (c *Context) Emit[E any](name string, payload E) {
 	emitWith(c, name, payload, nil)
 }
 
 // EmitScoped dispatches an event only to listeners in the same isolation scope,
 // mirroring Cordis's service-scoped filtering.
-func EmitScoped[E any](c *Context, scopeName, name string, payload E) {
+func (c *Context) EmitScoped[E any](scopeName, name string, payload E) {
 	emitWith(c, name, payload, c.scopeFilter(scopeName))
 }
 
@@ -235,16 +236,17 @@ func emitWith[E any](c *Context, name string, payload E, filter func(*eventListe
 
 // Bail dispatches an event and stops at the first listener returning a non-nil
 // value, which is returned with bailed=true.
-func Bail[E any](c *Context, name string, payload E) (result any, bailed bool) {
+func (c *Context) Bail[E any](name string, payload E) (result any, bailed bool) {
 	return bailWith(c, name, payload, nil)
 }
 
 // BailScoped is Bail restricted to the same isolation scope.
-func BailScoped[E any](c *Context, scopeName, name string, payload E) (any, bool) {
+func (c *Context) BailScoped[E any](scopeName, name string, payload E) (any, bool) {
 	return bailWith(c, name, payload, c.scopeFilter(scopeName))
 }
 
-func bailWith[E any](c *Context, name string, payload E, filter func(*eventListener) bool) (result any, bailed bool) {
+func bailWith[E any](c *Context, name string, payload E,
+	filter func(*eventListener) bool) (result any, bailed bool) {
 	for _, listener := range c.shared.bus.selectListeners(name, filter) {
 		value, err := c.shared.bus.invoke(listener, payload)
 		if err != nil {
@@ -260,27 +262,28 @@ func bailWith[E any](c *Context, name string, payload E, filter func(*eventListe
 
 // Serial is Bail for synchronous listeners; it exists so ported code keeps the
 // Cordis spelling. Awaiting async listeners is unnecessary in Go.
-func Serial[E any](c *Context, name string, payload E) (any, bool) {
-	return Bail(c, name, payload)
+func (c *Context) Serial[E any](name string, payload E) (any, bool) {
+	return c.Bail(name, payload)
 }
 
 // SerialScoped is Serial restricted to the same isolation scope.
-func SerialScoped[E any](c *Context, scopeName, name string, payload E) (any, bool) {
-	return BailScoped(c, scopeName, name, payload)
+func (c *Context) SerialScoped[E any](scopeName, name string, payload E) (any, bool) {
+	return c.BailScoped(scopeName, name, payload)
 }
 
 // Parallel dispatches an event to every listener concurrently and joins the
 // panics of failing listeners into one error.
-func Parallel[E any](c *Context, name string, payload E) error {
+func (c *Context) Parallel[E any](name string, payload E) error {
 	return parallelWith(c, name, payload, nil)
 }
 
 // ParallelScoped is Parallel restricted to the same isolation scope.
-func ParallelScoped[E any](c *Context, scopeName, name string, payload E) error {
+func (c *Context) ParallelScoped[E any](scopeName, name string, payload E) error {
 	return parallelWith(c, name, payload, c.scopeFilter(scopeName))
 }
 
-func parallelWith[E any](c *Context, name string, payload E, filter func(*eventListener) bool) error {
+func parallelWith[E any](c *Context, name string, payload E,
+	filter func(*eventListener) bool) error {
 	listeners := c.shared.bus.selectListeners(name, filter)
 	var wg sync.WaitGroup
 	errs := make([]error, len(listeners))
@@ -299,16 +302,17 @@ func parallelWith[E any](c *Context, name string, payload E, filter func(*eventL
 
 // Waterfall composes listeners around final: each listener may call next to
 // continue the chain, and the outermost listener's return value wins.
-func Waterfall[E any](c *Context, name string, payload E, final func(E) any) any {
+func (c *Context) Waterfall[E any](name string, payload E, final func(E) any) any {
 	return waterfallWith(c, name, payload, final, nil)
 }
 
 // WaterfallScoped is Waterfall restricted to the same isolation scope.
-func WaterfallScoped[E any](c *Context, scopeName, name string, payload E, final func(E) any) any {
+func (c *Context) WaterfallScoped[E any](scopeName, name string, payload E, final func(E) any) any {
 	return waterfallWith(c, name, payload, final, c.scopeFilter(scopeName))
 }
 
-func waterfallWith[E any](c *Context, name string, payload E, final func(E) any, filter func(*eventListener) bool) any {
+func waterfallWith[E any](c *Context, name string, payload E, final func(E) any,
+	filter func(*eventListener) bool) any {
 	listeners := c.shared.bus.selectListeners(name, filter)
 	index := 0
 	var next func(any) any
@@ -339,4 +343,56 @@ func waterfallWith[E any](c *Context, name string, payload E, final func(E) any,
 		return final(assertPayload[E](name, value))
 	}
 	return next(payload)
+}
+
+// Function forms of the Context methods above.
+
+// Emit is the function form of Context.Emit.
+func Emit[E any](c *Context, name string, payload E) {
+	c.Emit(name, payload)
+}
+
+// EmitScoped is the function form of Context.EmitScoped.
+func EmitScoped[E any](c *Context, scopeName, name string, payload E) {
+	c.EmitScoped(scopeName, name, payload)
+}
+
+// Bail is the function form of Context.Bail.
+func Bail[E any](c *Context, name string, payload E) (any, bool) {
+	return c.Bail(name, payload)
+}
+
+// BailScoped is the function form of Context.BailScoped.
+func BailScoped[E any](c *Context, scopeName, name string, payload E) (any, bool) {
+	return c.BailScoped(scopeName, name, payload)
+}
+
+// Serial is the function form of Context.Serial.
+func Serial[E any](c *Context, name string, payload E) (any, bool) {
+	return c.Serial(name, payload)
+}
+
+// SerialScoped is the function form of Context.SerialScoped.
+func SerialScoped[E any](c *Context, scopeName, name string, payload E) (any, bool) {
+	return c.SerialScoped(scopeName, name, payload)
+}
+
+// Parallel is the function form of Context.Parallel.
+func Parallel[E any](c *Context, name string, payload E) error {
+	return c.Parallel(name, payload)
+}
+
+// ParallelScoped is the function form of Context.ParallelScoped.
+func ParallelScoped[E any](c *Context, scopeName, name string, payload E) error {
+	return c.ParallelScoped(scopeName, name, payload)
+}
+
+// Waterfall is the function form of Context.Waterfall.
+func Waterfall[E any](c *Context, name string, payload E, final func(E) any) any {
+	return c.Waterfall(name, payload, final)
+}
+
+// WaterfallScoped is the function form of Context.WaterfallScoped.
+func WaterfallScoped[E any](c *Context, scopeName, name string, payload E, final func(E) any) any {
+	return c.WaterfallScoped(scopeName, name, payload, final)
 }

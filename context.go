@@ -25,7 +25,7 @@ func WithLevel(level Level) Option {
 type core struct {
 	mu              sync.Mutex
 	serviceBindings map[string]*serviceBinding
-	runtimes        map[Definition]*runtime
+	runtimes        map[definition]*runtime
 	counter         int
 	scopeSeq        int
 	root            *Context
@@ -42,7 +42,7 @@ type core struct {
 func New(opts ...Option) *Context {
 	appCore := &core{
 		serviceBindings: map[string]*serviceBinding{},
-		runtimes:        map[Definition]*runtime{},
+		runtimes:        map[definition]*runtime{},
 		logWriter:       io.Discard,
 		logLevel:        LevelInfo,
 	}
@@ -62,10 +62,12 @@ func New(opts ...Option) *Context {
 	if _, err := Provide[Registry](rootCtx, "registry", appCore.registryFacade()); err != nil {
 		panic(err)
 	}
-	if _, err := Provide[*EventService](rootCtx, "events", &EventService{ctx: rootCtx}); err != nil {
+	if _, err := Provide[*EventService](rootCtx, "events",
+		&EventService{ctx: rootCtx}); err != nil {
 		panic(err)
 	}
-	if _, err := Provide[*LoggerService](rootCtx, "logger", &LoggerService{svc: appCore.log}); err != nil {
+	if _, err := Provide[*LoggerService](rootCtx, "logger",
+		&LoggerService{svc: appCore.log}); err != nil {
 		panic(err)
 	}
 	return rootCtx
@@ -175,20 +177,6 @@ func (c *Context) Logger(name ...string) *Logger {
 	return &Logger{name: label, svc: c.shared.log}
 }
 
-// Load starts a plugin in this context and returns its fiber.
-//
-// The plugin stays pending until every service it declares in Inject is
-// provided by an active fiber.
-func (c *Context) Load(p Definition, cfg any) (*Fiber, error) {
-	return load(c, p, cfg, nil)
-}
-
-// LoadWithInject starts a plugin with extra required services on top of the
-// ones the plugin declares itself. Loaders use it for config-driven inject.
-func (c *Context) LoadWithInject(p Definition, cfg any, extra []string) (*Fiber, error) {
-	return load(c, p, cfg, extra)
-}
-
 // Provide registers a service under name, owned by this context's fiber.
 func (c *Context) Provide(name string, service any) (Disposer, error) {
 	return provide(c, name, service, nil)
@@ -196,7 +184,8 @@ func (c *Context) Provide(name string, service any) (Disposer, error) {
 
 // ProvideChecked registers a service together with an availability predicate.
 // While availabilityCheck returns false, dependents treat the service as missing.
-func (c *Context) ProvideChecked(name string, service any, availabilityCheck func() bool) (Disposer, error) {
+func (c *Context) ProvideChecked(name string, service any,
+	availabilityCheck func() bool) (Disposer, error) {
 	return provide(c, name, service, availabilityCheck)
 }
 
@@ -267,7 +256,8 @@ func Get[T any](c *Context, name string) (T, bool) {
 func MustGet[T any](c *Context, name string) T {
 	service, ok := Get[T](c, name)
 	if !ok {
-		panic(newError(ErrServiceMissing, "required service %q is not available in context %q", name, c.name))
+		panic(newError(ErrServiceMissing, "required service %q is not available in context %q",
+			name, c.name))
 	}
 	return service
 }
@@ -278,7 +268,8 @@ func Provide[T any](c *Context, name string, service T) (Disposer, error) {
 }
 
 // ProvideChecked registers a typed service with an availability predicate.
-func ProvideChecked[T any](c *Context, name string, service T, availabilityCheck func() bool) (Disposer, error) {
+func ProvideChecked[T any](c *Context, name string, service T,
+	availabilityCheck func() bool) (Disposer, error) {
 	return provide(c, name, service, availabilityCheck)
 }
 

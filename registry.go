@@ -5,12 +5,19 @@ import (
 	"reflect"
 )
 
-// Definition is the non-generic contract implemented by every Plugin[C].
+// definition is the contract every Plugin[C] implements, and the erasure
+// boundary the runtime works through: a fiber reaches the plugin body only
+// through ResolveConfig and Run, without knowing its config type.
 //
-// Implementations must be comparable (use a pointer type), because the registry
-// keys plugin runtimes by definition identity: loading the same definition
-// twice creates two fibers under one plugin runtime.
-type Definition interface {
+// It is deliberately unexported. Typed callers go through Context.Load, which
+// checks the config type at compile time; a host whose plugin types are only
+// known at run time erases the config type by capturing it in a closure at
+// registration time instead (see the loader package).
+//
+// Implementations must be comparable pointers: the registry keys plugin
+// runtimes by definition identity, so loading one definition twice creates two
+// fibers under a single plugin runtime.
+type definition interface {
 	// PluginName is the diagnostic name of the plugin.
 	PluginName() string
 	// InjectKeys lists the services the plugin requires before it may load.
@@ -25,7 +32,7 @@ type Definition interface {
 // one plugin.
 type runtime struct {
 	name       string
-	definition Definition
+	definition definition
 	fibers     []*Fiber
 }
 
@@ -57,7 +64,7 @@ func (p *Plugin[C]) WithValidate(validate func(*C) error) *Plugin[C] {
 	return p
 }
 
-// PluginName implements Definition.
+// PluginName reports the diagnostic name of the plugin.
 func (p *Plugin[C]) PluginName() string {
 	if p.Name == "" {
 		return "anonymous"
@@ -65,10 +72,11 @@ func (p *Plugin[C]) PluginName() string {
 	return p.Name
 }
 
-// InjectKeys implements Definition.
+// InjectKeys lists the services the plugin requires before it may load.
 func (p *Plugin[C]) InjectKeys() []string { return p.Inject }
 
-// ResolveConfig implements Definition.
+// ResolveConfig validates the raw config and converts it to this plugin's
+// config type. A config of another type is rejected.
 func (p *Plugin[C]) ResolveConfig(raw any) (any, error) {
 	var config C
 	switch value := raw.(type) {
@@ -77,7 +85,8 @@ func (p *Plugin[C]) ResolveConfig(raw any) (any, error) {
 	case C:
 		config = value
 	default:
-		return nil, newError(ErrInvalidPlugin, "plugin %s: config has type %T, want %T", p.PluginName(), raw, config)
+		return nil, newError(ErrInvalidPlugin, "plugin %s: config has type %T, want %T",
+			p.PluginName(), raw, config)
 	}
 	if p.Validate != nil {
 		if err := p.Validate(&config); err != nil {
@@ -87,7 +96,7 @@ func (p *Plugin[C]) ResolveConfig(raw any) (any, error) {
 	return config, nil
 }
 
-// Run implements Definition.
+// Run executes the plugin body with the config produced by ResolveConfig.
 func (p *Plugin[C]) Run(ctx *Context, config any) error {
 	if p.Apply == nil {
 		return newError(ErrInvalidPlugin, "plugin %s has no Apply function", p.PluginName())
@@ -96,22 +105,39 @@ func (p *Plugin[C]) Run(ctx *Context, config any) error {
 	return p.Apply(ctx, value)
 }
 
-// Load starts a typed plugin in the parent context and returns its fiber.
+// Load starts a typed plugin in this context and returns its fiber.
 //
 // Loading is synchronous, so when Load returns the fiber has already settled
 // into active, pending (dependencies unmet) or failed. A failed plugin body is
 // reported as the returned error and stays readable through fiber.Error(); the
-// fiber itself is still returned so the caller can inspect or restart it.
+// fiber itself is still returned so the caller can inspect or restart it. The
+// plugin stays pending until every service it declares in Inject is provided by
+// an active fiber.
+func (c *Context) Load[C any](plugin *Plugin[C], config C) (*Fiber, error) {
+	return load(c, plugin, config, nil)
+}
+
+// LoadWithInject starts a typed plugin with extra required services on top of
+// the ones the plugin declares itself. Loaders use it for config-driven inject.
+func (c *Context) LoadWithInject[C any](plugin *Plugin[C], config C,
+	extra ...string) (*Fiber, error) {
+	return load(c, plugin, config, extra)
+}
+
+// Function forms of the Context methods above.
+
+// Load is the function form of Context.Load.
 func Load[C any](parentCtx *Context, plugin *Plugin[C], config C) (*Fiber, error) {
-	return load(parentCtx, plugin, config, nil)
+	return parentCtx.Load(plugin, config)
 }
 
-// LoadWithInject starts a typed plugin with extra required services.
-func LoadWithInject[C any](parentCtx *Context, plugin *Plugin[C], config C, extra ...string) (*Fiber, error) {
-	return load(parentCtx, plugin, config, extra)
+// LoadWithInject is the function form of Context.LoadWithInject.
+func LoadWithInject[C any](parentCtx *Context, plugin *Plugin[C], config C,
+	extra ...string) (*Fiber, error) {
+	return parentCtx.LoadWithInject(plugin, config, extra...)
 }
 
-func load(parentCtx *Context, definition Definition, config any, extra []string) (*Fiber, error) {
+func load(parentCtx *Context, definition definition, config any, extra []string) (*Fiber, error) {
 	if definition == nil {
 		return nil, newError(ErrInvalidPlugin, "nil plugin definition")
 	}
@@ -144,10 +170,11 @@ func load(parentCtx *Context, definition Definition, config any, extra []string)
 	return fiber, nil
 }
 
-func (c *core) runtimeFor(definition Definition) (*runtime, error) {
+func (c *core) runtimeFor(definition definition) (*runtime, error) {
 	kind := reflect.TypeOf(definition)
 	if kind == nil || !kind.Comparable() {
-		return nil, newError(ErrInvalidPlugin, "plugin definition must be a comparable pointer, got %T", definition)
+		return nil, newError(ErrInvalidPlugin,
+			"plugin definition must be a comparable pointer, got %T", definition)
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()

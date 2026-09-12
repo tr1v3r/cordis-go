@@ -46,7 +46,7 @@ func TestProvideTwiceFails(t *testing.T) {
 func TestPluginWaitsForInjectedService(t *testing.T) {
 	root := cordis.New()
 	activations := 0
-	plugin := cordis.Define[struct{}]("consumer", func(ctx *cordis.Context, _ struct{}) error {
+	plugin := cordis.Define[struct{}]("consumer", func(_ *cordis.Context, _ struct{}) error {
 		activations++
 		return nil
 	}).WithInject("db")
@@ -130,7 +130,9 @@ func TestEffectsUnwindInReverseOrder(t *testing.T) {
 
 func TestDisposingParentDisposesChildren(t *testing.T) {
 	root := cordis.New()
-	childPlugin := cordis.Define[struct{}]("child", func(*cordis.Context, struct{}) error { return nil })
+	childPlugin := cordis.Define[struct{}]("child", func(*cordis.Context, struct{}) error {
+		return nil
+	})
 	var childFiber *cordis.Fiber
 	parentPlugin := cordis.Define[struct{}]("parent", func(ctx *cordis.Context, _ struct{}) error {
 		var err error
@@ -235,7 +237,8 @@ func TestEventDispatch(t *testing.T) {
 
 	cordis.On[string](root, "msg", func(m string) { order = append(order, "first:"+m) })
 	cordis.On[string](root, "msg", func(m string) { order = append(order, "second:"+m) })
-	cordis.On[string](root, "msg", func(m string) { order = append(order, "prepend:"+m) }, cordis.Prepend())
+	cordis.On[string](root, "msg", func(m string) { order = append(order, "prepend:"+m) },
+		cordis.Prepend())
 	cordis.Emit[string](root, "msg", "hi")
 
 	want := []string{"prepend:hi", "first:hi", "second:hi"}
@@ -284,10 +287,12 @@ func TestBailAndWaterfall(t *testing.T) {
 		}
 		return next(s)
 	})
-	if got := cordis.Waterfall[string](root, "cmd", "blocked", func(string) any { return "final" }); got != "vetoed" {
+	if got := cordis.Waterfall[string](root, "cmd", "blocked",
+		func(string) any { return "final" }); got != "vetoed" {
 		t.Fatalf("want vetoed, got %v", got)
 	}
-	if got := cordis.Waterfall[string](root, "cmd", "ok", func(s string) any { return "final:" + s }); got != "final:ok" {
+	if got := cordis.Waterfall[string](root, "cmd", "ok",
+		func(s string) any { return "final:" + s }); got != "final:ok" {
 		t.Fatalf("want final:ok, got %v", got)
 	}
 }
@@ -320,6 +325,116 @@ func TestParallelEventCollectsPanics(t *testing.T) {
 	}
 }
 
+// Every dispatch mode is reachable both as a Context method and as a package
+// function taking the context first; the two spellings must be interchangeable.
+func TestMethodFormsMatchFunctionForms(t *testing.T) {
+	root := cordis.New()
+
+	// Emit
+	var emitted []string
+	cordis.On[string](root, "emit", func(v string) { emitted = append(emitted, v) })
+	root.Emit("emit", "method")
+	cordis.Emit(root, "emit", "function")
+	if want := []string{"method", "function"}; !reflect.DeepEqual(emitted, want) {
+		t.Fatalf("Emit forms differ: want %v, got %v", want, emitted)
+	}
+
+	// EmitScoped
+	scoped := root.IsolateShared("region", "cn")
+	var scopedEmitted []string
+	cordis.On[string](scoped, "scoped", func(v string) { scopedEmitted = append(scopedEmitted, v) })
+	scoped.EmitScoped("region", "scoped", "method")
+	cordis.EmitScoped(scoped, "region", "scoped", "function")
+	if want := []string{"method", "function"}; !reflect.DeepEqual(scopedEmitted, want) {
+		t.Fatalf("EmitScoped forms differ: want %v, got %v", want, scopedEmitted)
+	}
+
+	// Bail
+	cordis.OnValue[string](root, "bail", func(string) any { return "hit" })
+	methodValue, methodBailed := root.Bail("bail", "x")
+	functionValue, functionBailed := cordis.Bail(root, "bail", "x")
+	if !methodBailed || methodValue != functionValue || methodBailed != functionBailed {
+		t.Fatalf("Bail forms differ: (%v,%v) vs (%v,%v)",
+			methodValue, methodBailed, functionValue, functionBailed)
+	}
+
+	// BailScoped
+	isolated := root.IsolateShared("pick", "a")
+	cordis.OnValue[string](isolated, "pick", func(string) any { return "scoped-hit" })
+	value, bailed := isolated.BailScoped("pick", "pick", "x")
+	scopedValue, scopedBailed := cordis.BailScoped(isolated, "pick", "pick", "x")
+	if !bailed || value != "scoped-hit" || value != scopedValue || bailed != scopedBailed {
+		t.Fatalf("BailScoped forms differ: (%v,%v) vs (%v,%v)",
+			value, bailed, scopedValue, scopedBailed)
+	}
+
+	// Serial is Bail under another name, in both spellings.
+	if v, ok := root.Serial("bail", "x"); !ok || v != methodValue {
+		t.Fatalf("Serial method: got (%v,%v)", v, ok)
+	}
+	if v, ok := cordis.Serial(root, "bail", "x"); !ok || v != methodValue {
+		t.Fatalf("Serial function: got (%v,%v)", v, ok)
+	}
+	if v, ok := isolated.SerialScoped("pick", "pick", "x"); !ok || v != "scoped-hit" {
+		t.Fatalf("SerialScoped method: got (%v,%v)", v, ok)
+	}
+	if v, ok := cordis.SerialScoped(isolated, "pick", "pick", "x"); !ok || v != "scoped-hit" {
+		t.Fatalf("SerialScoped function: got (%v,%v)", v, ok)
+	}
+
+	// Parallel
+	var mu sync.Mutex
+	var ran []string
+	for _, name := range []string{"a", "b"} {
+		cordis.On[string](root, "parallel", func(string) {
+			mu.Lock()
+			ran = append(ran, name)
+			mu.Unlock()
+		})
+	}
+	if err := root.Parallel("parallel", "x"); err != nil {
+		t.Fatalf("Parallel method: %v", err)
+	}
+	if err := cordis.Parallel(root, "parallel", "x"); err != nil {
+		t.Fatalf("Parallel function: %v", err)
+	}
+	if len(ran) != 4 {
+		t.Fatalf("Parallel forms differ: %v", ran)
+	}
+
+	// ParallelScoped surfaces a listener panic in both spellings.
+	panicky := root.IsolateShared("job", "p")
+	cordis.On[string](panicky, "job", func(string) { panic("listener exploded") })
+	if err := panicky.ParallelScoped("job", "job", "x"); err == nil {
+		t.Fatal("ParallelScoped method must surface the panic")
+	}
+	if err := cordis.ParallelScoped(panicky, "job", "job", "x"); err == nil {
+		t.Fatal("ParallelScoped function must surface the panic")
+	}
+
+	// Waterfall
+	cordis.OnWaterfall[string](root, "render", func(s string, next func(string) any) any {
+		return "wrap(" + next(s).(string) + ")"
+	})
+	final := func(s string) any { return "core:" + s }
+	methodResult := root.Waterfall("render", "x", final)
+	functionResult := cordis.Waterfall(root, "render", "x", final)
+	if methodResult != functionResult || methodResult != "wrap(core:x)" {
+		t.Fatalf("Waterfall forms differ: %v vs %v", methodResult, functionResult)
+	}
+
+	// WaterfallScoped
+	scopedPipe := root.IsolateShared("mw", "a")
+	cordis.OnWaterfall[string](scopedPipe, "pipe", func(s string, next func(string) any) any {
+		return "L[" + next(s).(string) + "]"
+	})
+	methodResult = scopedPipe.WaterfallScoped("mw", "pipe", "x", final)
+	functionResult = cordis.WaterfallScoped(scopedPipe, "mw", "pipe", "x", final)
+	if methodResult != functionResult || methodResult != "L[core:x]" {
+		t.Fatalf("WaterfallScoped forms differ: %v vs %v", methodResult, functionResult)
+	}
+}
+
 func TestScopedEventFiltering(t *testing.T) {
 	root := cordis.New()
 	left := root.Isolate("db")
@@ -329,7 +444,8 @@ func TestScopedEventFiltering(t *testing.T) {
 	cordis.On[string](left, "tick", func(v string) { seen = append(seen, "left:"+v) })
 	cordis.On[string](right, "tick", func(v string) { seen = append(seen, "right:"+v) })
 	cordis.On[string](root, "tick", func(v string) { seen = append(seen, "root:"+v) })
-	cordis.On[string](root, "tick", func(v string) { seen = append(seen, "global:"+v) }, cordis.Global())
+	cordis.On[string](root, "tick", func(v string) { seen = append(seen, "global:"+v) },
+		cordis.Global())
 
 	// Only listeners in the same isolation scope (plus Global ones) receive a
 	// scoped dispatch: the root context has its own default scope for "db".
@@ -361,6 +477,74 @@ func TestSamePluginLoadedTwice(t *testing.T) {
 	firstFiber.Dispose()
 	if secondFiber.State() != cordis.StateActive {
 		t.Fatalf("disposing one fiber must not affect the other: %s", secondFiber.State())
+	}
+}
+
+// Plugin loading follows the same rule as event dispatch: a Context method plus
+// an equivalent package function. Both spellings must reach one plugin runtime.
+func TestLoadMethodFormsMatchFunctionForms(t *testing.T) {
+	root := cordis.New()
+	activations := 0
+	plugin := cordis.Define[any]("p", func(*cordis.Context, any) error {
+		activations++
+		return nil
+	})
+
+	first, err := root.Load(plugin, 1) // method form, C inferred from the plugin
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := cordis.Load(root, plugin, 2) // function form
+	if err != nil {
+		t.Fatal(err)
+	}
+	if activations != 2 {
+		t.Fatalf("want 2 activations, got %d", activations)
+	}
+
+	registry, ok := cordis.Get[cordis.Registry](root, "registry")
+	if !ok {
+		t.Fatal("registry service missing")
+	}
+	if size := registry.Size(); size != 1 {
+		t.Fatalf("both spellings must share one plugin runtime, got %d", size)
+	}
+	if names := registry.Plugins(); len(names) != 1 || names[0] != "p" {
+		t.Fatalf("want [p], got %v", names)
+	}
+
+	first.Dispose()
+	if second.State() != cordis.StateActive {
+		t.Fatalf("disposing one fiber must not affect the other: %s", second.State())
+	}
+	second.Dispose()
+
+	// LoadWithInject gates on the extra service in both spellings.
+	waiting := cordis.Define[struct{}]("waiting", func(*cordis.Context, struct{}) error {
+		return nil
+	})
+	methodFiber, err := root.LoadWithInject(waiting, struct{}{}, "cache")
+	if err != nil {
+		t.Fatal(err)
+	}
+	functionFiber, err := cordis.LoadWithInject(root, waiting, struct{}{}, "cache")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if methodFiber.State() != cordis.StatePending {
+		t.Fatalf("method form: want pending without cache, got %s", methodFiber.State())
+	}
+	if functionFiber.State() != cordis.StatePending {
+		t.Fatalf("function form: want pending without cache, got %s", functionFiber.State())
+	}
+	if _, err := root.Provide("cache", &fakeDB{name: "cache"}); err != nil {
+		t.Fatal(err)
+	}
+	if methodFiber.State() != cordis.StateActive {
+		t.Fatalf("method form: want active after cache, got %s", methodFiber.State())
+	}
+	if functionFiber.State() != cordis.StateActive {
+		t.Fatalf("function form: want active after cache, got %s", functionFiber.State())
 	}
 }
 
@@ -433,7 +617,8 @@ func TestServiceOwnership(t *testing.T) {
 func TestServiceAvailabilityCheck(t *testing.T) {
 	root := cordis.New()
 	ready := false
-	if _, err := cordis.ProvideChecked[*fakeDB](root, "db", &fakeDB{name: "a"}, func() bool { return ready }); err != nil {
+	if _, err := cordis.ProvideChecked[*fakeDB](root, "db", &fakeDB{name: "a"},
+		func() bool { return ready }); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := cordis.Get[*fakeDB](root, "db"); ok {
@@ -570,7 +755,7 @@ func TestDisposeDuringLoadUnwindsCleanly(t *testing.T) {
 
 func TestConcurrentLifecycleIsRaceFree(t *testing.T) {
 	root := cordis.New()
-	plugin := cordis.Define[any]("p", func(ctx *cordis.Context, config any) error {
+	plugin := cordis.Define[any]("p", func(ctx *cordis.Context, _ any) error {
 		cordis.On[string](ctx, "tick", func(string) {})
 		_, _ = cordis.Provide[*fakeDB](ctx, "db", &fakeDB{name: "x"})
 		return nil
@@ -593,6 +778,9 @@ func TestConcurrentLifecycleIsRaceFree(t *testing.T) {
 	}
 	wg.Wait()
 	root.Fiber().Dispose()
+	if root.Fiber().State() != cordis.StateDisposed {
+		t.Fatalf("want disposed, got %s", root.Fiber().State())
+	}
 }
 
 func TestMustGet(t *testing.T) {
@@ -763,7 +951,8 @@ func TestScopedBailAndWaterfall(t *testing.T) {
 
 	cordis.OnValue[string](left, "ask", func(string) any { return "left" })
 	cordis.OnValue[string](root, "ask", func(string) any { return "root" })
-	if value, bailed := cordis.BailScoped[string](left, "db", "ask", "x"); !bailed || value != "left" {
+	if value, bailed := cordis.BailScoped[string](left, "db", "ask", "x"); !bailed ||
+		value != "left" {
 		t.Fatalf("scoped bail leaked across scopes: %v %v", value, bailed)
 	}
 	cordis.OnValue[string](root, "unscoped", func(string) any { return "root" })
@@ -774,7 +963,8 @@ func TestScopedBailAndWaterfall(t *testing.T) {
 	cordis.OnWaterfall[string](left, "cmd", func(s string, next func(string) any) any {
 		return next(s + "-left")
 	})
-	if got := cordis.WaterfallScoped[string](left, "db", "cmd", "x", func(s string) any { return s }); got != "x-left" {
+	if got := cordis.WaterfallScoped[string](left, "db", "cmd", "x",
+		func(s string) any { return s }); got != "x-left" {
 		t.Fatalf("scoped waterfall: %v", got)
 	}
 }
@@ -901,7 +1091,9 @@ func TestLoadErrorContract(t *testing.T) {
 	root := cordis.New()
 	boom := errors.New("boom")
 
-	failing := cordis.Define[struct{}]("failing", func(*cordis.Context, struct{}) error { return boom })
+	failing := cordis.Define[struct{}]("failing", func(*cordis.Context, struct{}) error {
+		return boom
+	})
 	fiber, err := cordis.Load(root, failing, struct{}{})
 	if !errors.Is(err, boom) {
 		t.Fatalf("Load: want the startup error, got %v", err)
@@ -914,11 +1106,14 @@ func TestLoadErrorContract(t *testing.T) {
 	if _, err := root.Load(failing, struct{}{}); !errors.Is(err, boom) {
 		t.Fatalf("ctx.Load: want the startup error, got %v", err)
 	}
-	if _, err := cordis.Inject(root, nil, func(*cordis.Context) error { return boom }); !errors.Is(err, boom) {
+	if _, err := cordis.Inject(root, nil,
+		func(*cordis.Context) error { return boom }); !errors.Is(err, boom) {
 		t.Fatalf("Inject: want the startup error, got %v", err)
 	}
 
-	waiting := cordis.Define[struct{}]("waiting", func(*cordis.Context, struct{}) error { return nil }).WithInject("nobody-provides-this")
+	waiting := cordis.Define[struct{}]("waiting", func(*cordis.Context, struct{}) error {
+		return nil
+	}).WithInject("nobody-provides-this")
 	pendingFiber, err := cordis.Load(root, waiting, struct{}{})
 	if err != nil {
 		t.Fatalf("unmet dependencies must not be an error, got %v", err)
