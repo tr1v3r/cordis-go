@@ -10,6 +10,12 @@
 //     cordis.Get[*DB](ctx, "db").
 //   - Plugin shapes (function / class / { apply }) become *cordis.Plugin[C]
 //     values with a typed config.
+//   - Runtime entry points — loading a plugin and dispatching an event — are
+//     methods on Context, each with an interchangeable package-level function
+//     form that takes the context first, for callers that must pass the helper
+//     as a value. Type-parameterised registration and lookup (On[E], Get[T],
+//     Provide[T]) stay package-level, because Context already uses those method
+//     names for their untyped forms.
 //   - Promises become synchronous calls; goroutines are cancelled through the
 //     context.Context returned by Context.Context.
 //   - Module hot replacement (import()) has no in-process equivalent in Go, so

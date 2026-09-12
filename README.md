@@ -18,23 +18,28 @@ plugin := cordis.Define[dbConfig]("db", func(ctx *cordis.Context, cfg dbConfig) 
     return err
 })
 
-fiber, err := cordis.Load(rootCtx, plugin, dbConfig{Path: "app.db"})
+fiber, err := rootCtx.Load(plugin, dbConfig{Path: "app.db"})
 ```
 
 加载是**同步**的：`Load` 返回时 fiber 已经定态。插件体（或配置校验）失败会同时从 `err` 和
 `fiber.Error()` 报出，fiber 本身照样返回，方便检查或 `Update` 重试；**依赖未就绪停在
-`pending` 不算错误**（`err == nil`）。
+`pending` 不算错误**（`err == nil`）。`ctx.Load(plugin, config)` 与等价的包级
+`cordis.Load(ctx, plugin, config)` 行为一致，后者用于需要把加载助手当作值传递的场合。
+
+配置类型在**编译期**校验：`Load` 只接受 `*Plugin[C]` 与该插件的 `C`。运行期才知道类型的宿主
+（例如 `loader`）在**注册时**用闭包把 `C` 固定下来，再调用泛型入口——库不再导出把类型擦除的
+`Definition` 契约。
 
 ## 核心语义映射
 
 | Cordis (TypeScript) | cordis-go | 说明 |
 | --- | --- | --- |
 | `ctx.foo` | `cordis.Get[*Foo](ctx, "foo")` | Go 没有 Proxy，改为显式、类型安全的查找 |
-| `ctx.plugin(p, cfg)` | `cordis.Load(ctx, p, cfg)` | 返回 `*Fiber`；同一个 plugin 加载两次 = 两个 fiber |
+| `ctx.plugin(p, cfg)` | `ctx.Load(p, cfg)` | 返回 `*Fiber`；同一个 plugin 加载两次 = 两个 fiber |
 | `ctx.inject(deps, cb)` | `cordis.Inject(ctx, deps, cb)` | 依赖就绪前挂起，变更时自动重载 |
 | `ctx.provide(name, v)` | `cordis.Provide[T](ctx, name, v)` | 返回 `(Disposer, error)`，所有权属于当前 fiber |
 | `ctx.effect(fn)` | `ctx.Effect(label, body)` | 可逆副作用 |
-| `ctx.on / emit / bail / waterfall` | `cordis.On / Emit / Bail / Waterfall` | 泛型事件，payload 类型在编译期确定 |
+| `ctx.on / emit / bail / waterfall` | `cordis.On` / `ctx.Emit` / `ctx.Bail` / `ctx.Waterfall` | 泛型事件，payload 类型在编译期确定；分发是 Context 方法，注册是包级函数 |
 | `ctx.isolate(name)` | `ctx.Isolate(name)` / `ctx.IsolateShared(name, label)` | 服务隔离，同名服务互不冲突；同一 label 可让两个作用域合并 |
 | `ctx.extend()` | `ctx.Fork(name)` | 共享 fiber 的子上下文 |
 | `@cordisjs/plugin-loader` + `cordis.yml` | `loader` 子包 + JSON 配置 | 配置驱动装配、patch 层、config dump |
@@ -96,7 +101,7 @@ consumer := cordis.Define[struct{}]("consumer", func(ctx *cordis.Context, _ stru
     return nil
 }).WithInject("db")
 
-fiber, _ := cordis.Load(rootCtx, consumer, struct{}{})
+fiber, _ := rootCtx.Load(consumer, struct{}{})
 // fiber.State() == StatePending —— 还没人提供 db
 
 dispose, _ := cordis.Provide[*DB](rootCtx, "db", newDB())
@@ -110,10 +115,27 @@ dispose()
 
 ### 5. Event — 带作用域过滤的事件总线
 
-`On` / `OnOnce` / `OnValue` / `OnWaterfall` 注册，`Emit` / `Bail` / `Serial` /
-`Parallel` / `Waterfall` 分发。每个分发模式都有 `*Scoped` 变体（`EmitScoped` /
-`BailScoped` / `SerialScoped` / `ParallelScoped` / `WaterfallScoped`），只投递给同一
-隔离作用域内的监听者；`cordis.Global()` 可让监听者跨越作用域（对应 Cordis 的 `global` 选项）。
+`On` / `OnOnce` / `OnValue` / `OnWaterfall` **注册**，`ctx.Emit` / `ctx.Bail` /
+`ctx.Serial` / `ctx.Parallel` / `ctx.Waterfall` **分发**。每个分发模式都有 `*Scoped`
+变体（`EmitScoped` / `BailScoped` / `SerialScoped` / `ParallelScoped` /
+`WaterfallScoped`），只投递给同一隔离作用域内的监听者；`cordis.Global()` 可让监听者
+跨越作用域（对应 Cordis 的 `global` 选项）。
+
+```go
+type Tick struct{ N int }
+
+cordis.On(rootCtx, "tick", func(t Tick) { ... })  // 注册：包级泛型函数
+rootCtx.Emit("tick", Tick{N: 1})                  // 分发：Context 方法（Go 1.27 泛型方法）
+cordis.Emit(rootCtx, "tick", Tick{N: 1})          // 等价函数形态，两者行为一致
+```
+
+方法形态都有等价的包级函数（首参为 context），用于必须把助手当作值传递的场合——泛型方法要
+先实例化才能取方法值；`ctx.Load` / `ctx.LoadWithInject` 遵循同一规则。
+
+例外是**注册侧**：`On[E]` / `OnOnce[E]` / `OnValue[E]` / `OnWaterfall[E]` 只能留在包级——
+`Context.On` 这个名字已被非泛型版（payload 为 `any`）占用，而 Go 不允许泛型方法与非泛型
+方法同名。`Get` / `Provide` 的非泛型方法同理不可替换：运行期按名字取用服务是刚需，inject
+键就是配置里的字符串。
 
 ## 配置驱动装配（loader）
 
@@ -213,15 +235,18 @@ go run ./cmd/cordis dump base.json profile.json
 
 `examples/basic` 演示了配置层叠加与 dump、依赖注入、事件、插件挂起与激活、卸载回收。
 `examples/events` 逐一演示 `Emit` / `Bail` / `Serial` / `Parallel` / `Waterfall` 五种分发
-模式及各自的 `*Scoped` 变体，附 `OnOnce` / `Prepend` / `Global` 与 panic 隔离。
+模式及各自的 `*Scoped` 变体（方法形态），附 `OnOnce` / `Prepend` / `Global` 与 panic 隔离。
 `examples/hotplug` 演示应用持续运行时 provider 插件消失，依赖方进入 `pending`，再注册一个
 提供同名服务的新插件后依赖方自动恢复。
 
 ## 状态
 
+- 需要 **Go 1.27+**：事件分发与插件加载用泛型方法（`go.mod` 的 `go 1.27.0` 即最低工具链要求）
 - 零第三方依赖（`go list -m all` 只有本模块），配置解码用标准库 `encoding/json`
-- `go vet` / `go test -race` 全绿；52 个测试，核心包覆盖率 83.1%，loader 72.7%
+- `go vet` / `go test -race` 全绿；57 个测试，核心包覆盖率 87.0%，loader 72.7%
 - 交叉编译验证：linux/amd64、windows/amd64、darwin/arm64
+- ⚠️ 破坏性变更：`Definition` 不再导出；`ctx.Load` / `ctx.LoadWithInject` 改为泛型方法
+  `(plugin, config)`，包级 `cordis.Load` 签名不变（迁移方式见开头的加载说明）
 
 ## 目录结构
 
