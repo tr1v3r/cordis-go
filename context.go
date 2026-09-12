@@ -23,16 +23,16 @@ func WithLevel(level Level) Option {
 // core is the state shared by every context of one application. It is reached
 // through Context.Root() so that child contexts stay cheap to create.
 type core struct {
-	mu             sync.Mutex
-	store          map[string]*impl
-	pluginRuntimes map[Definition]*pluginRuntime
-	counter        int
-	scopeSeq       int
-	root           *Context
-	bus            *eventBus
-	log            *loggerService
-	logWriter      io.Writer
-	logLevel       Level
+	mu              sync.Mutex
+	serviceBindings map[string]*serviceBinding
+	pluginRuntimes  map[Definition]*pluginRuntime
+	counter         int
+	scopeSeq        int
+	root            *Context
+	bus             *eventBus
+	log             *loggerService
+	logWriter       io.Writer
+	logLevel        Level
 }
 
 // New creates a root context and installs the built-in services.
@@ -41,10 +41,10 @@ type core struct {
 // plugin fiber loaded beneath it.
 func New(opts ...Option) *Context {
 	appCore := &core{
-		store:          map[string]*impl{},
-		pluginRuntimes: map[Definition]*pluginRuntime{},
-		logWriter:      io.Discard,
-		logLevel:       LevelInfo,
+		serviceBindings: map[string]*serviceBinding{},
+		pluginRuntimes:  map[Definition]*pluginRuntime{},
+		logWriter:       io.Discard,
+		logLevel:        LevelInfo,
 	}
 	for _, opt := range opts {
 		opt(appCore)
@@ -189,124 +189,122 @@ func (c *Context) LoadWithInject(p Definition, cfg any, extra []string) (*Fiber,
 	return load(c, p, cfg, extra)
 }
 
-// Provide registers value as the service name, owned by this context's fiber.
-func (c *Context) Provide(name string, value any) (Disposer, error) {
-	return provide(c, name, value, nil)
+// Provide registers a service under name, owned by this context's fiber.
+func (c *Context) Provide(name string, service any) (Disposer, error) {
+	return provide(c, name, service, nil)
 }
 
 // ProvideChecked registers a service together with an availability predicate.
-// While check returns false, dependents treat the service as missing.
-func (c *Context) ProvideChecked(name string, value any, check func() bool) (Disposer, error) {
-	return provide(c, name, value, check)
+// While availabilityCheck returns false, dependents treat the service as missing.
+func (c *Context) ProvideChecked(name string, service any, availabilityCheck func() bool) (Disposer, error) {
+	return provide(c, name, service, availabilityCheck)
 }
 
-// Set replaces the value of a service this context's fiber owns.
-func (c *Context) Set(name string, value any) error {
-	return setService(c, name, value)
+// Set replaces a service this context's fiber owns.
+func (c *Context) Set(name string, service any) error {
+	return setService(c, name, service)
 }
 
 // Lookup reads a service without a type assertion. The second result is false
 // when the service is unregistered or its provider is not active.
 func (c *Context) Lookup(name string) (any, bool) {
-	serviceImpl := c.resolveImpl(name)
-	if serviceImpl == nil {
+	binding := c.resolveService(name)
+	if binding == nil {
 		return nil, false
 	}
-	return serviceImpl.value, true
+	return binding.service, true
 }
 
-// resolveImpl mirrors Cordis's context proxy lookup: walk the owning fiber's
+// resolveService mirrors Cordis's context proxy lookup: walk the owning fiber's
 // dependency snapshot upwards until the isolation scope changes, then fall back
-// to the live registry. The snapshot is what makes a service visible to its own
-// provider (Cordis sets fiber.store[name] inside provide) and pins a dependent
-// to the provider it loaded against.
-func (c *Context) resolveImpl(name string) *impl {
-	label := c.isolateLabel(name)
+// to the live service registry. The snapshot makes a service visible to its own
+// provider and pins a dependent to the provider it loaded against.
+func (c *Context) resolveService(name string) *serviceBinding {
+	scopeLabel := c.isolateLabel(name)
 	for fiber := c.fiber; fiber != nil; {
 		fiber.mu.Lock()
-		serviceImpl := fiber.store[name]
+		binding := fiber.resolvedServices[name]
 		fiber.mu.Unlock()
 		// The snapshot is keyed by service name, so it can hold at most one
-		// implementation per name; the scope guard keeps two isolated services
-		// of the same name apart, and the availability check keeps a checked
-		// service from resolving while its predicate fails.
-		if serviceImpl != nil && serviceImpl.scope == label && serviceImpl.available() {
-			return serviceImpl
+		// binding per name; the scope guard keeps isolated services apart, and
+		// the availability check hides a service while its predicate fails.
+		if binding != nil && binding.scopeLabel == scopeLabel && binding.available() {
+			return binding
 		}
 		parentCtx := fiber.Parent
 		if parentCtx == nil || parentCtx.fiber == fiber {
 			break
 		}
-		if parentCtx.fiber.Ctx.isolateLabel(name) != label {
+		if parentCtx.fiber.Ctx.isolateLabel(name) != scopeLabel {
 			break
 		}
 		fiber = parentCtx.fiber
 	}
-	return c.shared.lookupStrict(name, label)
+	return c.shared.lookupService(scopeLabel)
 }
 
 // Get reads a service as an untyped value.
 func (c *Context) Get(name string) (any, bool) { return c.Lookup(name) }
 
 // Get reads a service with a type assertion. It reports false when the service
-// is missing, its provider is inactive, or the stored value has another type.
+// is missing, its provider is inactive, or the service has another type.
 func Get[T any](c *Context, name string) (T, bool) {
 	var zero T
-	serviceImpl := c.resolveImpl(name)
-	if serviceImpl == nil {
+	binding := c.resolveService(name)
+	if binding == nil {
 		return zero, false
 	}
-	value, ok := serviceImpl.value.(T)
+	service, ok := binding.service.(T)
 	if !ok {
 		return zero, false
 	}
-	return value, true
+	return service, true
 }
 
 // MustGet reads a required service by name and panics with a diagnostic when it
 // is unavailable. Inside a plugin, prefer declaring the dependency in Inject so
 // the plugin waits instead of failing.
 func MustGet[T any](c *Context, name string) T {
-	value, ok := Get[T](c, name)
+	service, ok := Get[T](c, name)
 	if !ok {
 		panic(newError(ErrServiceMissing, "required service %q is not available in context %q", name, c.name))
 	}
-	return value
+	return service
 }
 
 // Provide registers a typed service owned by c's fiber.
-func Provide[T any](c *Context, name string, value T) (Disposer, error) {
-	return provide(c, name, value, nil)
+func Provide[T any](c *Context, name string, service T) (Disposer, error) {
+	return provide(c, name, service, nil)
 }
 
 // ProvideChecked registers a typed service with an availability predicate.
-func ProvideChecked[T any](c *Context, name string, value T, check func() bool) (Disposer, error) {
-	return provide(c, name, value, check)
+func ProvideChecked[T any](c *Context, name string, service T, availabilityCheck func() bool) (Disposer, error) {
+	return provide(c, name, service, availabilityCheck)
 }
 
 // Serve registers a service and, when it implements Starter, calls Start after
 // registration; a failed Start rolls the registration back. On dispose it calls
 // Stop (if implemented) before unregistering, because Stop is registered later
 // and disposers run in reverse order.
-func Serve[T any](c *Context, name string, value T) (T, error) {
-	disposer, err := provide(c, name, value, nil)
+func Serve[T any](c *Context, name string, service T) (T, error) {
+	disposer, err := provide(c, name, service, nil)
 	if err != nil {
-		return value, err
+		return service, err
 	}
-	if starter, ok := any(value).(Starter); ok {
+	if starter, ok := any(service).(Starter); ok {
 		if err := starter.Start(); err != nil {
 			disposer()
-			return value, err
+			return service, err
 		}
 	}
-	if stopper, ok := any(value).(Stopper); ok {
+	if stopper, ok := any(service).(Stopper); ok {
 		c.OnDispose(func() {
 			if err := stopper.Stop(); err != nil {
 				c.Logger().Error("service %s: Stop failed: %v", name, err)
 			}
 		})
 	}
-	return value, nil
+	return service, nil
 }
 
 // Starter is implemented by services that need to run setup after registration.

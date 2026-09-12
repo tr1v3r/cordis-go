@@ -5,18 +5,18 @@ import (
 	"reflect"
 )
 
-// Definition is the runtime form of a plugin.
+// Definition is the non-generic contract implemented by every Plugin[C].
 //
 // Implementations must be comparable (use a pointer type), because the registry
 // keys plugin runtimes by definition identity: loading the same definition
-// twice creates two fibers under one runtime.
+// twice creates two fibers under one plugin runtime.
 type Definition interface {
 	// PluginName is the diagnostic name of the plugin.
 	PluginName() string
 	// InjectKeys lists the services the plugin requires before it may load.
 	InjectKeys() []string
 	// ResolveConfig validates and converts the raw config.
-	ResolveConfig(raw any) (any, error)
+	ResolveConfig(raw any) (config any, err error)
 	// Run executes the plugin body.
 	Run(ctx *Context, config any) error
 }

@@ -2,22 +2,29 @@ package cordis
 
 import "fmt"
 
-// impl is one provided service implementation, keyed by isolation scope label.
-type impl struct {
-	name  string
-	scope string
-	fiber *Fiber
-	value any
-	check func() bool
+// serviceBinding associates a service name and scope with its provider and
+// concrete service object.
+type serviceBinding struct {
+	name              string
+	scopeLabel        string
+	provider          *Fiber
+	service           any
+	availabilityCheck func() bool
 }
 
-func provide(c *Context, name string, value any, check func() bool) (Disposer, error) {
+func provide(c *Context, name string, service any, availabilityCheck func() bool) (Disposer, error) {
 	if name == "" {
 		return nil, newError(ErrServiceMissing, "service name must not be empty")
 	}
 	ownerFiber := c.fiber
-	scope := c.isolateLabel(name)
-	serviceImpl := &impl{name: name, scope: scope, fiber: ownerFiber, value: value, check: check}
+	scopeLabel := c.isolateLabel(name)
+	binding := &serviceBinding{
+		name:              name,
+		scopeLabel:        scopeLabel,
+		provider:          ownerFiber,
+		service:           service,
+		availabilityCheck: availabilityCheck,
+	}
 
 	// Report a dead owner as a typed error rather than panicking out of a
 	// constructor, which is where Provide is normally called.
@@ -27,102 +34,101 @@ func provide(c *Context, name string, value any, check func() bool) (Disposer, e
 	if inactive {
 		return nil, newError(ErrInactiveEffect, "cannot provide service %q on inactive context %q", name, ownerFiber.Name())
 	}
-	if err := c.shared.registerImpl(serviceImpl); err != nil {
+	if err := c.shared.registerService(binding); err != nil {
 		return nil, err
 	}
 
 	disposer, err := ownerFiber.tryEffect(fmt.Sprintf("ctx.Provide(%q)", name), func() Disposer {
 		// A service is visible to its own provider immediately, so a plugin may
-		// call the service it provides. Pending fibers have no store yet; their
-		// snapshot is built when they load.
+		// call the service it provides. Pending fibers have no resolved services
+		// yet; their snapshot is built when they load.
 		ownerFiber.mu.Lock()
-		if ownerFiber.store != nil {
-			ownerFiber.store[name] = serviceImpl
+		if ownerFiber.resolvedServices != nil {
+			ownerFiber.resolvedServices[name] = binding
 		}
 		ownerFiber.mu.Unlock()
 
 		if ownerFiber.State() == StateActive {
-			c.shared.notify(name, scope)
+			c.shared.notify(name, scopeLabel)
 		}
 
 		return func() {
-			c.shared.unregisterImpl(serviceImpl)
-			c.shared.notify(name, scope)
+			c.shared.unregisterService(binding)
+			c.shared.notify(name, scopeLabel)
 			ownerFiber.mu.Lock()
-			delete(ownerFiber.store, name)
+			delete(ownerFiber.resolvedServices, name)
 			ownerFiber.mu.Unlock()
 		}
 	})
 	if err != nil {
-		c.shared.unregisterImpl(serviceImpl)
+		c.shared.unregisterService(binding)
 		return nil, err
 	}
 	return disposer, nil
 }
 
-func setService(c *Context, name string, value any) error {
-	scope := c.isolateLabel(name)
-	serviceImpl := c.shared.getImpl(scope)
-	if serviceImpl == nil {
+func setService(c *Context, name string, service any) error {
+	scopeLabel := c.isolateLabel(name)
+	binding := c.shared.getServiceBinding(scopeLabel)
+	if binding == nil {
 		return newError(ErrServiceMissing, "cannot set service %q before it is provided", name)
 	}
-	if serviceImpl.fiber != c.fiber {
+	if binding.provider != c.fiber {
 		return newError(ErrServiceOwnership, "cannot set service %q from another fiber", name)
 	}
 	c.shared.mu.Lock()
-	serviceImpl.value = value
+	binding.service = service
 	c.shared.mu.Unlock()
-	c.shared.notify(name, scope)
+	c.shared.notify(name, scopeLabel)
 	return nil
 }
 
-func (c *core) registerImpl(entry *impl) error {
+func (c *core) registerService(binding *serviceBinding) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if existing, ok := c.store[entry.scope]; ok {
+	if existing, ok := c.serviceBindings[binding.scopeLabel]; ok {
 		owner := "unknown"
-		if existing.fiber != nil {
-			owner = existing.fiber.Name()
+		if existing.provider != nil {
+			owner = existing.provider.Name()
 		}
-		return newError(ErrServiceExists, "service %q is already provided by <%s>", entry.name, owner)
+		return newError(ErrServiceExists, "service %q is already provided by <%s>", binding.name, owner)
 	}
-	c.store[entry.scope] = entry
+	c.serviceBindings[binding.scopeLabel] = binding
 	return nil
 }
 
-func (c *core) unregisterImpl(entry *impl) {
+func (c *core) unregisterService(binding *serviceBinding) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if current, ok := c.store[entry.scope]; ok && current == entry {
-		delete(c.store, entry.scope)
+	if current, ok := c.serviceBindings[binding.scopeLabel]; ok && current == binding {
+		delete(c.serviceBindings, binding.scopeLabel)
 	}
 }
 
-func (c *core) getImpl(scope string) *impl {
+func (c *core) getServiceBinding(scopeLabel string) *serviceBinding {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.store[scope]
+	return c.serviceBindings[scopeLabel]
 }
 
-// lookupStrict resolves a service the way Cordis does with strict=true: the
-// provider must be ACTIVE and its availability predicate (if any) must pass.
-func (c *core) lookupStrict(name, scope string) *impl {
-	serviceImpl := c.getImpl(scope)
-	if serviceImpl == nil {
+// lookupService returns a binding only while its provider is active and its
+// availability predicate, if any, passes.
+func (c *core) lookupService(scopeLabel string) *serviceBinding {
+	binding := c.getServiceBinding(scopeLabel)
+	if binding == nil {
 		return nil
 	}
-	if serviceImpl.fiber != nil && serviceImpl.fiber.State() != StateActive {
+	if binding.provider != nil && binding.provider.State() != StateActive {
 		return nil
 	}
-	if !serviceImpl.available() {
+	if !binding.available() {
 		return nil
 	}
-	return serviceImpl
+	return binding
 }
 
-// available reports whether the implementation's availability predicate passes.
-func (i *impl) available() bool {
-	return i.check == nil || runCheck(i.check)
+func (binding *serviceBinding) available() bool {
+	return binding.availabilityCheck == nil || runCheck(binding.availabilityCheck)
 }
 
 func runCheck(check func() bool) (ok bool) {
@@ -139,9 +145,9 @@ func (c *core) providedNames(fiber *Fiber) []string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	var names []string
-	for _, serviceImpl := range c.store {
-		if serviceImpl.fiber == fiber {
-			names = append(names, serviceImpl.name)
+	for _, binding := range c.serviceBindings {
+		if binding.provider == fiber {
+			names = append(names, binding.name)
 		}
 	}
 	return names

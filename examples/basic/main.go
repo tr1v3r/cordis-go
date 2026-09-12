@@ -100,13 +100,13 @@ func main() {
 
 	// A plugin that needs a service nobody provides stays pending instead of
 	// failing; it activates as soon as the service appears.
-	cacheConsumerFiber, err := cordis.Load(rootCtx, cordis.Define("cache-consumer", func(ctx *cordis.Context, _ struct{}) error {
+	cacheConsumerFiber, err := rootCtx.Load(cordis.Define("cache-consumer", func(ctx *cordis.Context, _ struct{}) error {
 		ctx.Logger().Info("cache consumer started")
 		return nil
 	}).WithInject("cache"), struct{}{})
 	must(err)
 	fmt.Printf("fiber %-14s state=%s\n", cacheConsumerFiber.Name(), cacheConsumerFiber.State())
-	if _, err := cordis.Provide(rootCtx, "cache", &DB{path: "cache.db"}); err != nil {
+	if _, err := rootCtx.Provide("cache", &DB{path: "cache.db"}); err != nil {
 		must(err)
 	}
 	fmt.Printf("fiber %-14s state=%s\n", cacheConsumerFiber.Name(), cacheConsumerFiber.State())

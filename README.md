@@ -224,7 +224,7 @@ cordis-go/
 ├── context.go     # Context：查找、隔离、Fork、生命周期
 ├── fiber.go       # Fiber：状态机、epoch、加载/卸载
 ├── service.go     # 服务注册、查找、通知依赖者
-├── registry.go    # 插件定义与 runtime 注册表
+├── registry.go    # 插件定义与 plugin runtime 注册表
 ├── events.go      # 事件总线与五种分发模式
 ├── logger.go      # 轻量日志服务
 ├── disposable.go  # 幂等 Disposer 与 effect 列表
