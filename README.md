@@ -239,6 +239,29 @@ go run ./cmd/cordis dump base.json profile.json
 `examples/hotplug` 演示应用持续运行时 provider 插件消失，依赖方进入 `pending`，再注册一个
 提供同名服务的新插件后依赖方自动恢复。
 
+## 开发
+
+```sh
+make tools   # 安装 lint 工具（staticcheck、revive），只需一次
+make ci      # CI 跑的东西：gofmt 检查 + go vet + staticcheck + revive + go test -race
+```
+
+| 目标 | 作用 |
+| --- | --- |
+| `make fmt` | `gofmt -w .` |
+| `make vet` | `go vet ./...` |
+| `make lint` | gofmt 检查 + `go vet` + `staticcheck` + `revive -config .revive.toml` |
+| `make test` | `go test -race ./...` |
+| `make tools` | 安装固定版本的 staticcheck / revive |
+| `make ci` | `lint` + `test`，GitHub Actions 执行同一入口 |
+
+风格约定由 `.revive.toml` 固化（revive 默认规则集 + **100 列**行宽上限）。
+
+⚠️ **lint 工具必须用不低于 `go.mod` 声明的 Go 版本构建**：用旧 Go 编译的 `staticcheck` /
+`revive` 读不懂泛型方法，前者报 export data 版本错误，后者把源文件判成语法错误。
+`make tools` 装的就是验证过的版本。另外注意 `staticcheck` 在 `GOCACHE` 不可写时会**静默
+空转**（只打印 `./... matched no packages` 并返回 0）——看到这句就别信它的"通过"。
+
 ## 状态
 
 - 需要 **Go 1.27+**：事件分发与插件加载用泛型方法（`go.mod` 的 `go 1.27.0` 即最低工具链要求）
@@ -259,6 +282,9 @@ cordis-go/
 ├── events.go             # 事件总线与五种分发模式
 ├── logger.go             # 轻量日志服务
 ├── disposable.go         # 幂等 Disposer 与 effect 列表
+├── Makefile              # fmt / vet / lint / test / ci 入口
+├── .revive.toml          # 风格规则：revive 默认集 + 100 列行宽
+├── .github/workflows/    # CI：Go 1.27，跑 make ci
 ├── loader/               # 配置驱动装配、patch 层、config dump
 ├── cmd/cordis/           # 配置 dump 命令行工具
 └── examples/
