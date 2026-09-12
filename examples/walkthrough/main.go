@@ -8,7 +8,7 @@ import (
 )
 
 func main() {
-	app := cordis.New(cordis.WithWriter(os.Stdout), cordis.WithLevel(cordis.LevelDebug))
+	rootCtx := cordis.New(cordis.WithWriter(os.Stdout), cordis.WithLevel(cordis.LevelDebug))
 
 	plugin := cordis.Define[struct{}]("demo", func(ctx *cordis.Context, _ struct{}) error {
 		ctx.Effect("conn", func() cordis.Disposer {
@@ -20,14 +20,14 @@ func main() {
 		return nil
 	})
 
-	fiber, err := cordis.Load(app, plugin, struct{}{})
+	fiber, err := cordis.Load(rootCtx, plugin, struct{}{})
 	if err != nil {
 		panic(err)
 	}
-	ctx := fiber.Ctx
-	for _, meta := range ctx.Effects() {
-		ctx.Logger().Info("effect %q children=%d", meta.Label, len(meta.Children()))
+	pluginCtx := fiber.Ctx
+	for _, meta := range pluginCtx.Effects() {
+		pluginCtx.Logger().Info("effect %q children=%d", meta.Label, len(meta.Children()))
 	}
-	ctx.Logger().Info("--- dispose ---")
+	pluginCtx.Logger().Info("--- dispose ---")
 	fiber.Dispose()
 }

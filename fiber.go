@@ -82,7 +82,7 @@ type Fiber struct {
 	current   *effectEntry
 
 	done           chan struct{}
-	goctx          context.Context
+	lifecycleCtx   context.Context
 	cancel         context.CancelFunc
 	parentDisposer Disposer
 }
@@ -100,36 +100,36 @@ type PluginEvent struct {
 }
 
 func newRootFiber(ctx *Context) *Fiber {
-	goctx, cancel := context.WithCancel(context.Background())
+	lifecycleCtx, cancel := context.WithCancel(context.Background())
 	return &Fiber{
-		UID:     0,
-		Ctx:     ctx,
-		state:   StateActive,
-		root:    true,
-		store:   map[string]*impl{},
-		effects: newDisposableList(),
-		done:    make(chan struct{}),
-		goctx:   goctx,
-		cancel:  cancel,
+		UID:          0,
+		Ctx:          ctx,
+		state:        StateActive,
+		root:         true,
+		store:        map[string]*impl{},
+		effects:      newDisposableList(),
+		done:         make(chan struct{}),
+		lifecycleCtx: lifecycleCtx,
+		cancel:       cancel,
 	}
 }
 
-func newFiber(parent *Context, rt *runtime, cfg any, inject map[string]struct{}) *Fiber {
-	goctx, cancel := context.WithCancel(parent.fiber.goctx)
+func newFiber(parentCtx *Context, rt *runtime, cfg any, inject map[string]struct{}) *Fiber {
+	lifecycleCtx, cancel := context.WithCancel(parentCtx.fiber.lifecycleCtx)
 	fiber := &Fiber{
-		Parent:    parent,
-		runtime:   rt,
-		inject:    inject,
-		rawConfig: cfg,
-		state:     StatePending,
-		epoch:     epochInactive,
-		effects:   newDisposableList(),
-		done:      make(chan struct{}),
-		goctx:     goctx,
-		cancel:    cancel,
+		Parent:       parentCtx,
+		runtime:      rt,
+		inject:       inject,
+		rawConfig:    cfg,
+		state:        StatePending,
+		epoch:        epochInactive,
+		effects:      newDisposableList(),
+		done:         make(chan struct{}),
+		lifecycleCtx: lifecycleCtx,
+		cancel:       cancel,
 	}
-	fiber.UID = parent.shared.nextUID()
-	fiber.Ctx = parent.Fork(rt.name)
+	fiber.UID = parentCtx.shared.nextUID()
+	fiber.Ctx = parentCtx.Fork(rt.name)
 	fiber.Ctx.fiber = fiber
 
 	// The parent owns the child's lifetime: disposing the parent disposes every
@@ -137,7 +137,7 @@ func newFiber(parent *Context, rt *runtime, cfg any, inject map[string]struct{})
 	// Register the child's disposal on the parent, then publish the handle under
 	// the fiber lock: a concurrent parent unload can dispose this fiber before
 	// the assignment lands, and the handle must not be lost.
-	release := parent.fiber.onDispose(fiber.Dispose)
+	release := parentCtx.fiber.onDispose(fiber.Dispose)
 	fiber.mu.Lock()
 	if fiber.disposed {
 		fiber.mu.Unlock()
@@ -146,8 +146,8 @@ func newFiber(parent *Context, rt *runtime, cfg any, inject map[string]struct{})
 		fiber.parentDisposer = release
 		fiber.mu.Unlock()
 	}
-	parent.shared.addFiber(rt, fiber)
-	parent.shared.bus.emitInternal("internal/plugin", &PluginEvent{Fiber: fiber})
+	parentCtx.shared.addFiber(rt, fiber)
+	parentCtx.shared.bus.emitInternal("internal/plugin", &PluginEvent{Fiber: fiber})
 	fiber.refresh()
 	return fiber
 }
@@ -210,8 +210,8 @@ func (f *Fiber) Store() map[string]any {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	out := make(map[string]any, len(f.store))
-	for name, impl := range f.store {
-		out[name] = impl.value
+	for name, serviceImpl := range f.store {
+		out[name] = serviceImpl.value
 	}
 	return out
 }
@@ -253,12 +253,12 @@ func (f *Fiber) tryEffect(label string, body func() Disposer) (Disposer, error) 
 		return nil, newError(ErrInactiveEffect, "cannot create effect on inactive context %q", f.Name())
 	}
 	entry := &effectEntry{meta: &EffectMeta{Label: label}}
-	parent := f.current
+	parentEffect := f.current
 	var remove func() bool
-	if parent != nil {
+	if parentEffect != nil {
 		// A nested effect is owned by the enclosing one, exactly like Cordis's
 		// effect collector: disposing the outer effect disposes its children.
-		parent.addChild(entry)
+		parentEffect.addChild(entry)
 	} else {
 		_, remove = f.effects.add(entry)
 	}
@@ -268,12 +268,12 @@ func (f *Fiber) tryEffect(label string, body func() Disposer) (Disposer, error) 
 	dispose, panicked := runEffectBody(body)
 
 	f.mu.Lock()
-	f.current = parent
+	f.current = parentEffect
 	f.mu.Unlock()
 
 	if panicked != nil {
-		if parent != nil {
-			parent.detach(entry)
+		if parentEffect != nil {
+			parentEffect.detach(entry)
 		} else {
 			remove()
 		}
@@ -289,8 +289,8 @@ func (f *Fiber) tryEffect(label string, body func() Disposer) (Disposer, error) 
 		return func() {}, nil
 	}
 	return Once(func() {
-		if parent != nil {
-			parent.detach(entry)
+		if parentEffect != nil {
+			parentEffect.detach(entry)
 		} else {
 			remove()
 		}
@@ -407,12 +407,12 @@ func (f *Fiber) computeEpoch() string {
 	names := f.Inject()
 	var builder strings.Builder
 	for _, name := range names {
-		impl := f.shared().lookupStrict(name, f.Ctx.isolateLabel(name))
-		if impl == nil {
+		serviceImpl := f.shared().lookupStrict(name, f.Ctx.isolateLabel(name))
+		if serviceImpl == nil {
 			return epochInactive
 		}
 		builder.WriteByte(':')
-		builder.WriteString(strconv.Itoa(impl.fiber.UID))
+		builder.WriteString(strconv.Itoa(serviceImpl.fiber.UID))
 	}
 	return builder.String()
 }
@@ -423,19 +423,19 @@ func (f *Fiber) load() {
 	f.mu.Unlock()
 	f.setState(StateLoading)
 
-	store := make(map[string]*impl, len(f.inject))
+	resolvedServices := make(map[string]*impl, len(f.inject))
 	for _, name := range f.Inject() {
-		impl := f.shared().lookupStrict(name, f.Ctx.isolateLabel(name))
-		if impl == nil {
+		serviceImpl := f.shared().lookupStrict(name, f.Ctx.isolateLabel(name))
+		if serviceImpl == nil {
 			// A dependency vanished between the epoch computation and now.
 			f.refresh()
 			return
 		}
-		store[name] = impl
+		resolvedServices[name] = serviceImpl
 	}
 
 	f.mu.Lock()
-	f.store = store
+	f.store = resolvedServices
 	raw := f.rawConfig
 	f.mu.Unlock()
 

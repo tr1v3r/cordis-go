@@ -15,46 +15,46 @@ func provide(c *Context, name string, value any, check func() bool) (Disposer, e
 	if name == "" {
 		return nil, newError(ErrServiceMissing, "service name must not be empty")
 	}
-	fiber := c.fiber
+	ownerFiber := c.fiber
 	scope := c.isolateLabel(name)
-	entry := &impl{name: name, scope: scope, fiber: fiber, value: value, check: check}
+	serviceImpl := &impl{name: name, scope: scope, fiber: ownerFiber, value: value, check: check}
 
 	// Report a dead owner as a typed error rather than panicking out of a
 	// constructor, which is where Provide is normally called.
-	fiber.mu.Lock()
-	inactive := fiber.disposed || fiber.state == StateUnloading
-	fiber.mu.Unlock()
+	ownerFiber.mu.Lock()
+	inactive := ownerFiber.disposed || ownerFiber.state == StateUnloading
+	ownerFiber.mu.Unlock()
 	if inactive {
-		return nil, newError(ErrInactiveEffect, "cannot provide service %q on inactive context %q", name, fiber.Name())
+		return nil, newError(ErrInactiveEffect, "cannot provide service %q on inactive context %q", name, ownerFiber.Name())
 	}
-	if err := c.shared.registerImpl(entry); err != nil {
+	if err := c.shared.registerImpl(serviceImpl); err != nil {
 		return nil, err
 	}
 
-	disposer, err := fiber.tryEffect(fmt.Sprintf("ctx.Provide(%q)", name), func() Disposer {
+	disposer, err := ownerFiber.tryEffect(fmt.Sprintf("ctx.Provide(%q)", name), func() Disposer {
 		// A service is visible to its own provider immediately, so a plugin may
 		// call the service it provides. Pending fibers have no store yet; their
 		// snapshot is built when they load.
-		fiber.mu.Lock()
-		if fiber.store != nil {
-			fiber.store[name] = entry
+		ownerFiber.mu.Lock()
+		if ownerFiber.store != nil {
+			ownerFiber.store[name] = serviceImpl
 		}
-		fiber.mu.Unlock()
+		ownerFiber.mu.Unlock()
 
-		if fiber.State() == StateActive {
+		if ownerFiber.State() == StateActive {
 			c.shared.notify(name, scope)
 		}
 
 		return func() {
-			c.shared.unregisterImpl(entry)
+			c.shared.unregisterImpl(serviceImpl)
 			c.shared.notify(name, scope)
-			fiber.mu.Lock()
-			delete(fiber.store, name)
-			fiber.mu.Unlock()
+			ownerFiber.mu.Lock()
+			delete(ownerFiber.store, name)
+			ownerFiber.mu.Unlock()
 		}
 	})
 	if err != nil {
-		c.shared.unregisterImpl(entry)
+		c.shared.unregisterImpl(serviceImpl)
 		return nil, err
 	}
 	return disposer, nil
@@ -62,15 +62,15 @@ func provide(c *Context, name string, value any, check func() bool) (Disposer, e
 
 func setService(c *Context, name string, value any) error {
 	scope := c.isolateLabel(name)
-	entry := c.shared.getImpl(scope)
-	if entry == nil {
+	serviceImpl := c.shared.getImpl(scope)
+	if serviceImpl == nil {
 		return newError(ErrServiceMissing, "cannot set service %q before it is provided", name)
 	}
-	if entry.fiber != c.fiber {
+	if serviceImpl.fiber != c.fiber {
 		return newError(ErrServiceOwnership, "cannot set service %q from another fiber", name)
 	}
 	c.shared.mu.Lock()
-	entry.value = value
+	serviceImpl.value = value
 	c.shared.mu.Unlock()
 	c.shared.notify(name, scope)
 	return nil
@@ -107,17 +107,17 @@ func (c *core) getImpl(scope string) *impl {
 // lookupStrict resolves a service the way Cordis does with strict=true: the
 // provider must be ACTIVE and its availability predicate (if any) must pass.
 func (c *core) lookupStrict(name, scope string) *impl {
-	entry := c.getImpl(scope)
-	if entry == nil {
+	serviceImpl := c.getImpl(scope)
+	if serviceImpl == nil {
 		return nil
 	}
-	if entry.fiber != nil && entry.fiber.State() != StateActive {
+	if serviceImpl.fiber != nil && serviceImpl.fiber.State() != StateActive {
 		return nil
 	}
-	if !entry.available() {
+	if !serviceImpl.available() {
 		return nil
 	}
-	return entry
+	return serviceImpl
 }
 
 // available reports whether the implementation's availability predicate passes.
@@ -139,9 +139,9 @@ func (c *core) providedNames(fiber *Fiber) []string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	var names []string
-	for _, entry := range c.store {
-		if entry.fiber == fiber {
-			names = append(names, entry.name)
+	for _, serviceImpl := range c.store {
+		if serviceImpl.fiber == fiber {
+			names = append(names, serviceImpl.name)
 		}
 	}
 	return names

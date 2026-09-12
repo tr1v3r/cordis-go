@@ -101,20 +101,20 @@ func (p *Plugin[C]) Run(ctx *Context, config any) error {
 // into active, pending (dependencies unmet) or failed. A failed plugin body is
 // reported as the returned error and stays readable through fiber.Error(); the
 // fiber itself is still returned so the caller can inspect or restart it.
-func Load[C any](parent *Context, plugin *Plugin[C], config C) (*Fiber, error) {
-	return load(parent, plugin, config, nil)
+func Load[C any](parentCtx *Context, plugin *Plugin[C], config C) (*Fiber, error) {
+	return load(parentCtx, plugin, config, nil)
 }
 
 // LoadWithInject starts a typed plugin with extra required services.
-func LoadWithInject[C any](parent *Context, plugin *Plugin[C], config C, extra ...string) (*Fiber, error) {
-	return load(parent, plugin, config, extra)
+func LoadWithInject[C any](parentCtx *Context, plugin *Plugin[C], config C, extra ...string) (*Fiber, error) {
+	return load(parentCtx, plugin, config, extra)
 }
 
-func load(parent *Context, def Definition, config any, extra []string) (*Fiber, error) {
+func load(parentCtx *Context, def Definition, config any, extra []string) (*Fiber, error) {
 	if def == nil {
 		return nil, newError(ErrInvalidPlugin, "nil plugin definition")
 	}
-	if err := parent.fiber.assertActive(); err != nil {
+	if err := parentCtx.fiber.assertActive(); err != nil {
 		return nil, err
 	}
 
@@ -129,11 +129,11 @@ func load(parent *Context, def Definition, config any, extra []string) (*Fiber, 
 			inject[name] = struct{}{}
 		}
 	}
-	rt, err := parent.shared.runtimeFor(def)
+	rt, err := parentCtx.shared.runtimeFor(def)
 	if err != nil {
 		return nil, err
 	}
-	fiber := newFiber(parent, rt, config, inject)
+	fiber := newFiber(parentCtx, rt, config, inject)
 	if fiber.State() == StateFailed {
 		// Cordis surfaces a startup error through fiber.await(); a synchronous
 		// Load has no later await point, so it must return the error here or a
@@ -172,10 +172,10 @@ func (d *injectDefinition) Run(ctx *Context, _ any) error  { return d.body(ctx) 
 
 // Inject runs body once every service in deps is available, reloading it
 // whenever a provider changes. It is the Go form of ctx.inject().
-func Inject(parent *Context, deps []string, body func(*Context) error) (*Fiber, error) {
+func Inject(parentCtx *Context, deps []string, body func(*Context) error) (*Fiber, error) {
 	name := "inject"
 	if body != nil {
 		name = fmt.Sprintf("inject#%p", body)
 	}
-	return load(parent, &injectDefinition{name: name, deps: deps, body: body}, nil, nil)
+	return load(parentCtx, &injectDefinition{name: name, deps: deps, body: body}, nil, nil)
 }

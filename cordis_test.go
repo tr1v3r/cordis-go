@@ -130,15 +130,15 @@ func TestEffectsUnwindInReverseOrder(t *testing.T) {
 
 func TestDisposingParentDisposesChildren(t *testing.T) {
 	root := cordis.New()
-	child := cordis.Define[struct{}]("child", func(*cordis.Context, struct{}) error { return nil })
+	childPlugin := cordis.Define[struct{}]("child", func(*cordis.Context, struct{}) error { return nil })
 	var childFiber *cordis.Fiber
-	parent := cordis.Define[struct{}]("parent", func(ctx *cordis.Context, _ struct{}) error {
+	parentPlugin := cordis.Define[struct{}]("parent", func(ctx *cordis.Context, _ struct{}) error {
 		var err error
-		childFiber, err = cordis.Load(ctx, child, struct{}{})
+		childFiber, err = cordis.Load(ctx, childPlugin, struct{}{})
 		return err
 	})
 
-	parentFiber, err := cordis.Load(root, parent, struct{}{})
+	parentFiber, err := cordis.Load(root, parentPlugin, struct{}{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -347,20 +347,20 @@ func TestSamePluginLoadedTwice(t *testing.T) {
 		activations++
 		return nil
 	})
-	first, err := cordis.Load[any](root, plugin, 1)
+	firstFiber, err := cordis.Load[any](root, plugin, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := cordis.Load[any](root, plugin, 2)
+	secondFiber, err := cordis.Load[any](root, plugin, 2)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if activations != 2 {
 		t.Fatalf("want 2 activations, got %d", activations)
 	}
-	first.Dispose()
-	if second.State() != cordis.StateActive {
-		t.Fatalf("disposing one fiber must not affect the other: %s", second.State())
+	firstFiber.Dispose()
+	if secondFiber.State() != cordis.StateActive {
+		t.Fatalf("disposing one fiber must not affect the other: %s", secondFiber.State())
 	}
 }
 
@@ -533,7 +533,7 @@ func TestTwoIsolatedProvidersOfSameNameOnRoot(t *testing.T) {
 func TestDisposeDuringLoadUnwindsCleanly(t *testing.T) {
 	root := cordis.New()
 	entered := make(chan struct{})
-	release := make(chan struct{})
+	allowPluginReturn := make(chan struct{})
 	var fiber *cordis.Fiber
 	unwound := 0
 
@@ -541,7 +541,7 @@ func TestDisposeDuringLoadUnwindsCleanly(t *testing.T) {
 		ctx.OnDispose(func() { unwound++ })
 		fiber = ctx.Fiber()
 		close(entered)
-		<-release
+		<-allowPluginReturn
 		return nil
 	})
 
@@ -557,7 +557,7 @@ func TestDisposeDuringLoadUnwindsCleanly(t *testing.T) {
 	// The plugin body is still running: Dispose must defer the teardown to the
 	// in-flight transition instead of unloading concurrently.
 	fiber.Dispose()
-	close(release)
+	close(allowPluginReturn)
 	<-loaded
 
 	if fiber.State() != cordis.StateDisposed {
@@ -919,12 +919,12 @@ func TestLoadErrorContract(t *testing.T) {
 	}
 
 	waiting := cordis.Define[struct{}]("waiting", func(*cordis.Context, struct{}) error { return nil }).WithInject("nobody-provides-this")
-	pending, err := cordis.Load(root, waiting, struct{}{})
+	pendingFiber, err := cordis.Load(root, waiting, struct{}{})
 	if err != nil {
 		t.Fatalf("unmet dependencies must not be an error, got %v", err)
 	}
-	if pending.State() != cordis.StatePending {
-		t.Fatalf("want pending, got %s", pending.State())
+	if pendingFiber.State() != cordis.StatePending {
+		t.Fatalf("want pending, got %s", pendingFiber.State())
 	}
 }
 

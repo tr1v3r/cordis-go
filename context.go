@@ -40,35 +40,35 @@ type core struct {
 // The returned context owns the whole application: disposing it disposes every
 // plugin fiber loaded beneath it.
 func New(opts ...Option) *Context {
-	shared := &core{
+	appCore := &core{
 		store:     map[string]*impl{},
 		plugins:   map[Definition]*runtime{},
 		logWriter: io.Discard,
 		logLevel:  LevelInfo,
 	}
 	for _, opt := range opts {
-		opt(shared)
+		opt(appCore)
 	}
 
-	root := &Context{shared: shared, name: "root"}
-	rootFiber := newRootFiber(root)
-	root.fiber = rootFiber
-	shared.root = root
-	shared.bus = newEventBus(shared)
-	shared.log = newLoggerService(shared.logWriter, shared.logLevel)
+	rootCtx := &Context{shared: appCore, name: "root"}
+	rootFiber := newRootFiber(rootCtx)
+	rootCtx.fiber = rootFiber
+	appCore.root = rootCtx
+	appCore.bus = newEventBus(appCore)
+	appCore.log = newLoggerService(appCore.logWriter, appCore.logLevel)
 
 	// Built-in services are ordinary services: plugins may inject them by name
 	// and they disappear with the root fiber like any other effect.
-	if _, err := Provide[Registry](root, "registry", shared.registryFacade()); err != nil {
+	if _, err := Provide[Registry](rootCtx, "registry", appCore.registryFacade()); err != nil {
 		panic(err)
 	}
-	if _, err := Provide[*EventService](root, "events", &EventService{ctx: root}); err != nil {
+	if _, err := Provide[*EventService](rootCtx, "events", &EventService{ctx: rootCtx}); err != nil {
 		panic(err)
 	}
-	if _, err := Provide[*LoggerService](root, "logger", &LoggerService{svc: shared.log}); err != nil {
+	if _, err := Provide[*LoggerService](rootCtx, "logger", &LoggerService{svc: appCore.log}); err != nil {
 		panic(err)
 	}
-	return root
+	return rootCtx
 }
 
 // Context is a dependency container and a lifecycle scope.
@@ -115,9 +115,9 @@ func (c *Context) Isolate(name string) *Context {
 // with the same name and label join one scope, mirroring Cordis's
 // isolate(name, label).
 func (c *Context) IsolateShared(name, label string) *Context {
-	child := c.Fork(c.name)
-	child.isolate = map[string]string{name: label}
-	return child
+	isolatedCtx := c.Fork(c.name)
+	isolatedCtx.isolate = map[string]string{name: label}
+	return isolatedCtx
 }
 
 // isolateLabel resolves the scope label of a service name by walking the
@@ -147,7 +147,7 @@ func (c *Context) Done() <-chan struct{} { return c.fiber.done }
 // Context returns a context.Context that is cancelled when this context's
 // fiber is disposed. Hand it to goroutines started by a plugin so that they
 // stop when the plugin unloads.
-func (c *Context) Context() context.Context { return c.fiber.goctx }
+func (c *Context) Context() context.Context { return c.fiber.lifecycleCtx }
 
 // OnDispose registers a disposer owned by this context's fiber. Disposers run
 // in reverse registration order when the fiber unloads. It panics with
@@ -208,11 +208,11 @@ func (c *Context) Set(name string, value any) error {
 // Lookup reads a service without a type assertion. The second result is false
 // when the service is unregistered or its provider is not active.
 func (c *Context) Lookup(name string) (any, bool) {
-	impl := c.resolveImpl(name)
-	if impl == nil {
+	serviceImpl := c.resolveImpl(name)
+	if serviceImpl == nil {
 		return nil, false
 	}
-	return impl.value, true
+	return serviceImpl.value, true
 }
 
 // resolveImpl mirrors Cordis's context proxy lookup: walk the owning fiber's
@@ -224,23 +224,23 @@ func (c *Context) resolveImpl(name string) *impl {
 	label := c.isolateLabel(name)
 	for fiber := c.fiber; fiber != nil; {
 		fiber.mu.Lock()
-		impl := fiber.store[name]
+		serviceImpl := fiber.store[name]
 		fiber.mu.Unlock()
 		// The snapshot is keyed by service name, so it can hold at most one
 		// implementation per name; the scope guard keeps two isolated services
 		// of the same name apart, and the availability check keeps a checked
 		// service from resolving while its predicate fails.
-		if impl != nil && impl.scope == label && impl.available() {
-			return impl
+		if serviceImpl != nil && serviceImpl.scope == label && serviceImpl.available() {
+			return serviceImpl
 		}
-		parent := fiber.Parent
-		if parent == nil || parent.fiber == fiber {
+		parentCtx := fiber.Parent
+		if parentCtx == nil || parentCtx.fiber == fiber {
 			break
 		}
-		if parent.fiber.Ctx.isolateLabel(name) != label {
+		if parentCtx.fiber.Ctx.isolateLabel(name) != label {
 			break
 		}
-		fiber = parent.fiber
+		fiber = parentCtx.fiber
 	}
 	return c.shared.lookupStrict(name, label)
 }
@@ -252,11 +252,11 @@ func (c *Context) Get(name string) (any, bool) { return c.Lookup(name) }
 // is missing, its provider is inactive, or the stored value has another type.
 func Get[T any](c *Context, name string) (T, bool) {
 	var zero T
-	impl := c.resolveImpl(name)
-	if impl == nil {
+	serviceImpl := c.resolveImpl(name)
+	if serviceImpl == nil {
 		return zero, false
 	}
-	value, ok := impl.value.(T)
+	value, ok := serviceImpl.value.(T)
 	if !ok {
 		return zero, false
 	}

@@ -36,18 +36,20 @@ func (s *Server) Stop() error {
 type Ping struct{ From string }
 
 const baseLayer = `[
-  {"id": "db", "name": "db", "config": {"path": "data/app.db"}},
-  {"id": "server", "name": "server", "config": {"addr": ":8080", "tls": true}}
+  {"id": "primary-db", "name": "database-module", "config": {"path": "data/app.db"}},
+  {"id": "api-server", "name": "http-module", "config": {"addr": ":8080", "tls": true}}
 ]`
 
 const profileLayer = `[
-  {"id": "server", "config": {"addr": ":9090"}}
+  {"id": "api-server", "config": {"addr": ":9090"}}
 ]`
 
 func main() {
 	registry := loader.NewRegistry()
 
-	loader.MustRegister(registry, "db", cordis.Define("db", func(ctx *cordis.Context, cfg dbConfig) error {
+	// Registry names select plugin definitions from config; they are independent
+	// from the diagnostic plugin names and the services those plugins provide.
+	loader.MustRegister(registry, "database-module", cordis.Define("database-provider", func(ctx *cordis.Context, cfg dbConfig) error {
 		database := &DB{path: cfg.Path}
 		if _, err := cordis.Serve(ctx, "db", database); err != nil {
 			return err
@@ -56,7 +58,7 @@ func main() {
 		return nil
 	}))
 
-	loader.MustRegister(registry, "server", cordis.Define("server", func(ctx *cordis.Context, cfg serverConfig) error {
+	loader.MustRegister(registry, "http-module", cordis.Define("http-server", func(ctx *cordis.Context, cfg serverConfig) error {
 		// The db dependency is declared below via WithInject, so this plugin only
 		// runs once the db service exists.
 		database, ok := cordis.Get[*DB](ctx, "db")
@@ -84,34 +86,34 @@ func main() {
 	fmt.Println("== composed config ==")
 	must(tree.Dump(os.Stdout))
 
-	root := cordis.New(cordis.WithWriter(os.Stdout), cordis.WithLevel(cordis.LevelInfo))
+	rootCtx := cordis.New(cordis.WithWriter(os.Stdout), cordis.WithLevel(cordis.LevelInfo))
 
 	fmt.Println("== load ==")
-	fibers, err := tree.Load(root, registry)
+	fibers, err := tree.Load(rootCtx, registry)
 	must(err)
 	for _, fiber := range fibers {
 		fmt.Printf("fiber %-8s state=%s deps=%v\n", fiber.Name(), fiber.State(), fiber.Inject())
 	}
 
 	fmt.Println("== event ==")
-	cordis.Emit(root, "ping", &Ping{From: "cli"})
+	cordis.Emit(rootCtx, "ping", &Ping{From: "cli"})
 
 	// A plugin that needs a service nobody provides stays pending instead of
 	// failing; it activates as soon as the service appears.
-	pending, err := cordis.Load(root, cordis.Define("cache", func(ctx *cordis.Context, _ struct{}) error {
-		ctx.Logger().Info("cache started")
+	cacheConsumerFiber, err := cordis.Load(rootCtx, cordis.Define("cache-consumer", func(ctx *cordis.Context, _ struct{}) error {
+		ctx.Logger().Info("cache consumer started")
 		return nil
 	}).WithInject("cache"), struct{}{})
 	must(err)
-	fmt.Printf("fiber %-8s state=%s\n", pending.Name(), pending.State())
-	if _, err := cordis.Provide(root, "cache", &DB{path: "cache.db"}); err != nil {
+	fmt.Printf("fiber %-14s state=%s\n", cacheConsumerFiber.Name(), cacheConsumerFiber.State())
+	if _, err := cordis.Provide(rootCtx, "cache", &DB{path: "cache.db"}); err != nil {
 		must(err)
 	}
-	fmt.Printf("fiber %-8s state=%s\n", pending.Name(), pending.State())
+	fmt.Printf("fiber %-14s state=%s\n", cacheConsumerFiber.Name(), cacheConsumerFiber.State())
 
 	fmt.Println("== dispose ==")
-	root.Fiber().Dispose()
-	_, alive := cordis.Get[*Server](root, "server")
+	rootCtx.Fiber().Dispose()
+	_, alive := cordis.Get[*Server](rootCtx, "server")
 	fmt.Printf("server service still available: %v\n", alive)
 }
 
