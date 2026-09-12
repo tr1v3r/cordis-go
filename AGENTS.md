@@ -28,8 +28,9 @@ make fmt     # 也可以单跑某一环：make fmt / vet / lint / test
 - **擦除边界**：`registry.go` 的 `definition` 是**非导出**接口，fiber 靠它在不认识配置类型的前提下
   调用 `ResolveConfig` / `Run`。不要重新导出它——`Definition` 已经删除（见 README 破坏性变更）。
 - **泛型入口成对出现**：Context 方法 + 等价包级函数（`ctx.Emit` / `cordis.Emit`、`ctx.Load` /
-  `cordis.Load`）。包级函数不是历史包袱——泛型方法必须先实例化才能当方法值，它是唯一通道。
-  完整约定写在 `doc.go`。
+  `cordis.Load`）。包级形态集中在 `funcforms.go`，它们存在的理由是能把助手当成
+  `func(*Context, ...)` 传递——方法值（`ctx.Emit[T]`）已经把接收者绑进去了，类型里没有 ctx。
+  上游 TS 只有方法形态，所以这是 Go 侧的补充；完整约定写在 `doc.go`。
 - **这些名字没有方法形态**：`Get[T]` / `Provide[T]` / `ProvideChecked[T]`。原因是 `Context` 上
   同名**非泛型**方法已存在（运行期按名字取服务是刚需），而 Go 不允许泛型方法与非泛型方法同名
   ——方法集一个名字只能有一个方法。给某个操作加方法形态前，先确认 `Context` 上没有同名方法。
@@ -55,7 +56,8 @@ make fmt     # 也可以单跑某一环：make fmt / vet / lint / test
 
 | 要做什么 | 动哪里 |
 | --- | --- |
-| 加一种事件分发模式 | `events.go`：方法 + `*Scoped` 变体 + 包级转发三条，同步 `doc.go` 的约定段、`examples/events`、以及方法/函数形态的对拍测试 |
+| 加一种事件分发模式 | `events.go`（方法 + `*Scoped` 变体）+ `funcforms.go` 的等价转发，同步 `doc.go` 的约定段、`examples/events`、以及方法/函数形态的对拍测试 |
+| 改包级转发形态 | `funcforms.go`——方法本体留在各自文件里，这里只放转发 |
 | 改公开 API 形态 | 先读 `doc.go` 的泛型约定，再确认 `Context` 上没有同名非泛型方法 |
 | 加示例 | `examples/<名字>/main.go`，同步 README 的运行节与目录树，并保证能直接 `go run` |
 | 改配置装配 | `loader/loader.go`——`Register[C]` 的注册期擦除是关键 |
