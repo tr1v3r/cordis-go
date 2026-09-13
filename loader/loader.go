@@ -595,9 +595,17 @@ func (r *Registry) Names() []string {
 	return names
 }
 
+// decodeConfig turns a map-based config into the plugin's own type by encoding
+// it back to JSON, so the target type's UnmarshalJSON runs and its defaults and
+// validation apply.
+//
+// A nil map means "no config" and leaves the target at its zero value. An empty
+// map is a config object like any other and must still reach the target type:
+// a pointer config gets allocated and a defaulted field gets its default, which
+// is exactly what a type with its own UnmarshalJSON expects for `config: {}`.
 func decodeConfig[C any](raw map[string]any) (C, error) {
 	var config C
-	if len(raw) == 0 {
+	if raw == nil {
 		return config, nil
 	}
 	data, err := json.Marshal(raw)
