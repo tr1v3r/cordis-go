@@ -105,12 +105,12 @@ func LoadPatchLayer(label, path string) (Layer, error) {
 }
 
 func loadLayerFile(label, path string, patch bool) (Layer, error) {
+	if label == "" {
+		label = path
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return Layer{}, fmt.Errorf("layer %s: %w", label, err)
-	}
-	if label == "" {
-		label = path
 	}
 	if patch {
 		return ParsePatchLayer(label, data)
@@ -500,12 +500,32 @@ func (c *treeComposer) indexNode(node *Node) error {
 	return nil
 }
 
+// cloneMap copies a config map and the containers inside it, so a composed tree
+// never aliases the patch it was built from: the same Patch can feed several
+// trees, and one tree's config must not change underneath the others. Only the
+// shapes a layer file can produce (map[string]any and []any) are copied; any
+// other value is shared as-is.
 func cloneMap(source map[string]any) map[string]any {
 	out := make(map[string]any, len(source))
 	for key, value := range source {
-		out[key] = value
+		out[key] = cloneValue(value)
 	}
 	return out
+}
+
+func cloneValue(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		return cloneMap(typed)
+	case []any:
+		out := make([]any, len(typed))
+		for index, item := range typed {
+			out[index] = cloneValue(item)
+		}
+		return out
+	default:
+		return value
+	}
 }
 
 // Find returns the node with the given id, searching the whole tree.
@@ -513,6 +533,11 @@ func (t *Tree) Find(id string) *Node {
 	var walk func([]*Node) *Node
 	walk = func(nodes []*Node) *Node {
 		for _, node := range nodes {
+			if node == nil {
+				// A tree built by hand may hold nil entries. Load skips them,
+				// so the read-only walkers skip them too.
+				continue
+			}
 			if node.ID == id {
 				return node
 			}
@@ -529,8 +554,13 @@ func (t *Tree) Find(id string) *Node {
 func (t *Tree) Size() int {
 	var count func([]*Node) int
 	count = func(nodes []*Node) int {
-		total := len(nodes)
+		total := 0
 		for _, node := range nodes {
+			if node == nil {
+				// Nil entries are not loaded, so they are not counted.
+				continue
+			}
+			total++
 			total += count(node.Children)
 		}
 		return total
