@@ -17,11 +17,11 @@ func loadPlanTestFiber(t *testing.T, root *Context, plugin *Plugin[struct{}]) *F
 	return nil
 }
 
-func setPlanTestState(f *Fiber, epoch string, cleaned, disposed, forceReload bool) {
+func setPlanTestState(f *Fiber, epoch string, hasEffects, disposed, forceReload bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.epoch = epoch
-	f.cleaned = cleaned
+	f.hasEffects = hasEffects
 	f.disposed = disposed
 	f.forceReload = forceReload
 }
@@ -36,37 +36,37 @@ func TestPlanSelectsTransition(t *testing.T) {
 		{
 			name:   "disposed",
 			plugin: planTestPlugin("disposed"),
-			setup:  func(f *Fiber) { setPlanTestState(f, "", true, true, false) },
+			setup:  func(f *Fiber) { setPlanTestState(f, "", false, true, false) },
 			want:   actionDispose,
 		},
 		{
 			name:   "forced reload",
 			plugin: planTestPlugin("reload", "missing"),
-			setup:  func(f *Fiber) { setPlanTestState(f, epochInactive, true, false, true) },
+			setup:  func(f *Fiber) { setPlanTestState(f, epochInactive, false, false, true) },
 			want:   actionReload,
 		},
 		{
 			name:   "same epoch",
 			plugin: planTestPlugin("same"),
-			setup:  func(f *Fiber) { setPlanTestState(f, "", true, false, false) },
+			setup:  func(f *Fiber) { setPlanTestState(f, "", false, false, false) },
 			want:   actionNoop,
 		},
 		{
 			name:   "inactive epoch",
 			plugin: planTestPlugin("unload", "missing"),
-			setup:  func(f *Fiber) { setPlanTestState(f, "", true, false, false) },
+			setup:  func(f *Fiber) { setPlanTestState(f, "", false, false, false) },
 			want:   actionUnload,
 		},
 		{
 			name:   "clean load",
 			plugin: planTestPlugin("load"),
-			setup:  func(f *Fiber) { setPlanTestState(f, "old", true, false, false) },
+			setup:  func(f *Fiber) { setPlanTestState(f, "old", false, false, false) },
 			want:   actionLoad,
 		},
 		{
 			name:   "dirty cycle",
 			plugin: planTestPlugin("cycle"),
-			setup:  func(f *Fiber) { setPlanTestState(f, "old", false, false, false) },
+			setup:  func(f *Fiber) { setPlanTestState(f, "old", true, false, false) },
 			want:   actionCycle,
 		},
 	}
@@ -89,7 +89,7 @@ func TestPlanSelectsTransition(t *testing.T) {
 func TestPlanConsumesForceReload(t *testing.T) {
 	root := New()
 	fiber := loadPlanTestFiber(t, root, planTestPlugin("consume"))
-	setPlanTestState(fiber, "", true, false, true)
+	setPlanTestState(fiber, "", false, false, true)
 
 	fiber.plan()
 

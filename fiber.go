@@ -3,6 +3,7 @@ package cordis
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -79,7 +80,7 @@ type Fiber struct {
 	dirty            bool
 	forceReload      bool
 	disposed         bool
-	cleaned          bool
+	hasEffects       bool
 	root             bool
 	current          *effectEntry
 
@@ -119,6 +120,7 @@ func newRootFiber(ctx *Context) *Fiber {
 		root:             true,
 		resolvedServices: map[string]*serviceBinding{},
 		effects:          newDisposableList(),
+		hasEffects:       true,
 		done:             make(chan struct{}),
 		disposedDone:     make(chan struct{}),
 		lifecycleCtx:     lifecycleCtx,
@@ -137,7 +139,7 @@ func newFiber(parentCtx *Context, runtime *runtime, cfg any,
 		state:        StatePending,
 		epoch:        epochInactive,
 		effects:      newDisposableList(),
-		cleaned:      true,
+		hasEffects:   false,
 		done:         make(chan struct{}),
 		disposedDone: make(chan struct{}),
 		lifecycleCtx: lifecycleCtx,
@@ -340,7 +342,7 @@ func (f *Fiber) runDisposer(entry *effectEntry) {
 		f.callDisposer(entry, dispose)
 	}
 	// Nested effects unwind after their owner, newest first.
-	for i := len(children) - 1; i >= 0; i-- {
+	for i := range slices.Backward(children) {
 		f.runDisposer(children[i])
 	}
 }
@@ -423,7 +425,7 @@ func (f *Fiber) plan() (action fiberAction, bindings map[string]*serviceBinding,
 
 	f.mu.Lock()
 	same := epoch == f.epoch
-	cleaned := f.cleaned
+	hasEffects := f.hasEffects
 	f.mu.Unlock()
 
 	if same {
@@ -432,10 +434,10 @@ func (f *Fiber) plan() (action fiberAction, bindings map[string]*serviceBinding,
 	if epoch == epochInactive {
 		return actionUnload, nil, ""
 	}
-	if cleaned {
-		return actionLoad, bindings, epoch
+	if hasEffects {
+		return actionCycle, bindings, epoch
 	}
-	return actionCycle, bindings, epoch
+	return actionLoad, bindings, epoch
 }
 
 // applyUnload records the inactive epoch and unloads the current generation.
@@ -518,26 +520,23 @@ func (f *Fiber) reconcile() {
 		return
 	}
 	f.epoch = epoch
-	cleaned := f.cleaned
+	hasEffects := f.hasEffects
 	f.mu.Unlock()
 
 	if epoch == epochInactive {
 		f.unload()
 		return
 	}
-	if cleaned {
-		f.load(bindings)
-		return
-	}
-
-	f.unload()
-
-	f.mu.Lock()
-	disposed := f.disposed
-	f.mu.Unlock()
-	if disposed {
+	if hasEffects {
 		f.unload()
-		return
+
+		f.mu.Lock()
+		disposed := f.disposed
+		f.mu.Unlock()
+		if disposed {
+			f.unload()
+			return
+		}
 	}
 	f.load(bindings)
 }
@@ -571,7 +570,7 @@ func (f *Fiber) load(bindings map[string]*serviceBinding) {
 		f.mu.Unlock()
 		return
 	}
-	f.cleaned = false
+	f.hasEffects = true
 	f.mu.Unlock()
 	if !f.setState(StateLoading) {
 		return
@@ -648,7 +647,10 @@ func (f *Fiber) fail(err error) {
 // finishes through finalizeDispose, otherwise it returns to pending.
 func (f *Fiber) unload() {
 	f.mu.Lock()
-	if f.cleaned {
+	if f.hasEffects {
+		f.hasEffects = false
+		f.mu.Unlock()
+	} else {
 		disposed := f.disposed
 		f.mu.Unlock()
 		if disposed {
@@ -656,8 +658,6 @@ func (f *Fiber) unload() {
 		}
 		return
 	}
-	f.cleaned = true
-	f.mu.Unlock()
 
 	f.setState(StateUnloading)
 	for _, entry := range f.effects.clear() {
