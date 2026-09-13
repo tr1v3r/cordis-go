@@ -334,6 +334,78 @@ func TestBusyDisposeReleasesParentHandle(t *testing.T) {
 	}
 }
 
+// TestFailedLoadLeavesNoPhantomRuntime pins the registry bookkeeping: a load
+// rejected because its parent started unloading must leave no runtime behind.
+// Nothing else removes it, so Size and Plugins would report a plugin that has
+// no fiber for the rest of the application's life.
+func TestFailedLoadLeavesNoPhantomRuntime(t *testing.T) {
+	root := cordis.New()
+	registry, ok := cordis.Get[cordis.Registry](root, "registry")
+	if !ok {
+		t.Fatal("registry service missing")
+	}
+
+	var parentCtx *cordis.Context
+	unloading := make(chan struct{})
+	releaseParent := make(chan struct{})
+	var blockOnce sync.Once
+	parent := cordis.Define[struct{}]("parent", func(ctx *cordis.Context, _ struct{}) error {
+		parentCtx = ctx
+		ctx.OnDispose(func() {
+			// Block the first unload so the parent stays in StateUnloading
+			// until the test releases it: that is the window Load must survive.
+			blockOnce.Do(func() {
+				close(unloading)
+				<-releaseParent
+			})
+		})
+		return nil
+	})
+	parentFiber, err := root.Load(parent, struct{}{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parentCtx == nil {
+		t.Fatal("parent did not capture its context")
+	}
+
+	restarted := make(chan struct{})
+	go func() {
+		defer close(restarted)
+		if err := parentFiber.Restart(); err != nil {
+			t.Error(err)
+		}
+	}()
+	select {
+	case <-unloading:
+	case <-time.After(2 * time.Second):
+		t.Fatal("parent did not start unloading")
+	}
+	waitFiberState(t, parentFiber, cordis.StateUnloading)
+
+	child := cordis.Define[struct{}]("child", func(*cordis.Context, struct{}) error { return nil })
+	if _, err := parentCtx.Load(child, struct{}{}); err == nil {
+		t.Fatal("want a load on an unloading parent to fail, got nil")
+	}
+	if names := registry.Plugins(); len(names) != 1 || names[0] != "parent" {
+		t.Fatalf("want plugins [parent] after the failed load, got %v", names)
+	}
+	if size := registry.Size(); size != 1 {
+		t.Fatalf("want registry size 1 after the failed load, got %d", size)
+	}
+
+	close(releaseParent)
+	select {
+	case <-restarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("parent restart did not finish")
+	}
+	parentFiber.Dispose()
+	if size := registry.Size(); size != 0 {
+		t.Fatalf("want registry size 0 after dispose, got %d", size)
+	}
+}
+
 // TestSetGetConcurrent exercises concurrent Set and Get calls. It is most
 // useful under the race detector.
 func TestSetGetConcurrent(t *testing.T) {
