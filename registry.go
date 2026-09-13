@@ -34,6 +34,11 @@ type runtime struct {
 	name       string
 	definition definition
 	fibers     []*Fiber
+	// claims counts the loads that have taken this runtime but have not yet
+	// attached a fiber to it. A runtime leaves the registry only when it has
+	// neither a fiber nor a claim, so a load that fails cannot unregister the
+	// runtime a concurrent load of the same definition is still using.
+	claims int
 }
 
 // Plugin is a typed plugin definition.
@@ -148,6 +153,14 @@ func load(parentCtx *Context, definition definition, config any, extra []string)
 		return nil, err
 	}
 	fiber := newFiber(parentCtx, runtime, config, inject)
+	if err := fiber.start(); err != nil {
+		fiber.cancel()
+		// start attached nothing, so nothing keeps the runtime registered: give
+		// back the claim it took, or the registry would report a plugin with no
+		// fiber until the definition is loaded again.
+		parentCtx.shared.discardRuntime(runtime)
+		return nil, err
+	}
 	if fiber.State() == StateFailed {
 		// Cordis surfaces a startup error through fiber.await(); a synchronous
 		// Load has no later await point, so it must return the error here or a
@@ -165,12 +178,28 @@ func (c *core) runtimeFor(definition definition) (*runtime, error) {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if existing, ok := c.runtimes[definition]; ok {
-		return existing, nil
+	registered, ok := c.runtimes[definition]
+	if !ok {
+		registered = &runtime{name: definition.PluginName(), definition: definition}
+		c.runtimes[definition] = registered
 	}
-	runtime := &runtime{name: definition.PluginName(), definition: definition}
-	c.runtimes[definition] = runtime
-	return runtime, nil
+	// Claim the runtime for this load: it stays registered until the load
+	// attaches a fiber or gives the claim back.
+	registered.claims++
+	return registered, nil
+}
+
+// discardRuntime gives back the claim a load took on runtime without attaching
+// a fiber to it. The runtime stays registered while another load holds a claim
+// or a fiber of its own remains; otherwise it leaves the registry, so a failed
+// load leaves no trace.
+func (c *core) discardRuntime(runtime *runtime) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	runtime.claims--
+	if runtime.claims == 0 && len(runtime.fibers) == 0 {
+		delete(c.runtimes, runtime.definition)
+	}
 }
 
 // injectDefinition backs Context.Inject.

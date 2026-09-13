@@ -44,6 +44,7 @@ type core struct {
 	runtimes        map[definition]*runtime
 	counter         int
 	scopeSeq        int
+	bindingSeq      int
 	root            *Context
 	bus             *eventBus
 	log             *loggerService
@@ -178,9 +179,10 @@ func (c *core) nextScope(name string) string {
 // Done is closed when this context's fiber is disposed.
 func (c *Context) Done() <-chan struct{} { return c.fiber.done }
 
-// Context returns a context.Context that is cancelled when this context's
-// fiber is disposed. Hand it to goroutines started by a plugin so that they
-// stop when the plugin unloads.
+// Context returns a context.Context that is cancelled when the owning fiber
+// is disposed. Hand it to goroutines started by a plugin so that they stop
+// when the fiber is disposed. Dependency-driven unloads do not cancel it: use
+// OnDispose to stop resources that must not survive a reload.
 func (c *Context) Context() context.Context { return c.fiber.lifecycleCtx }
 
 // OnDispose registers a disposer owned by this context's fiber. Disposers run
@@ -216,19 +218,31 @@ func (c *Context) Set(name string, service any) error {
 }
 
 // Lookup reads a service without a type assertion. The second result is false
-// when the service is unregistered or its provider is not active.
+// when the service is unavailable to this context: it is not registered in the
+// context's isolation scope, its availability predicate currently fails, or its
+// provider is inactive and it is only reachable through the live registry.
+//
+// A binding pinned in the caller's dependency snapshot behaves differently: a
+// service this fiber injected, or one it provides itself, stays readable while
+// that fiber's generation runs, even when its provider is still loading or
+// already unloading. The fiber re-resolves once its own transition settles.
 func (c *Context) Lookup(name string) (any, bool) {
 	binding := c.resolveService(name)
 	if binding == nil {
 		return nil, false
 	}
-	return binding.service, true
+	return binding.getService(), true
 }
 
 // resolveService mirrors Cordis's context proxy lookup: walk the owning fiber's
 // dependency snapshot upwards until the isolation scope changes, then fall back
 // to the live service registry. The snapshot makes a service visible to its own
 // provider and pins a dependent to the provider it loaded against.
+//
+// Unlike the live registry, the snapshot re-checks only the availability
+// predicate, never provider activity: it pins the binding for the life of the
+// generation, and the provider's own state transition is what re-resolves the
+// dependent.
 func (c *Context) resolveService(name string) *serviceBinding {
 	scopeLabel := c.isolateLabel(name)
 	for fiber := c.fiber; fiber != nil; {
@@ -236,9 +250,12 @@ func (c *Context) resolveService(name string) *serviceBinding {
 		binding := fiber.resolvedServices[name]
 		fiber.mu.Unlock()
 		// The snapshot is keyed by service name, so it can hold at most one
-		// binding per name; the scope guard keeps isolated services apart, and
-		// the availability check hides a service while its predicate fails.
-		if binding != nil && binding.scopeLabel == scopeLabel && binding.available() {
+		// binding per name; the scope guard keeps isolated services apart, the
+		// name guard rejects a binding another service name isolated onto this
+		// label, and the availability check hides a service while its predicate
+		// fails.
+		if binding != nil && binding.name == name && binding.scopeLabel == scopeLabel &&
+			binding.available() {
 			return binding
 		}
 		parentCtx := fiber.Parent
@@ -250,19 +267,19 @@ func (c *Context) resolveService(name string) *serviceBinding {
 		}
 		fiber = parentCtx.fiber
 	}
-	return c.shared.lookupService(scopeLabel)
+	return c.shared.lookupService(scopeLabel, name)
 }
 
-// Get reads a service with a type assertion. It reports false when the service
-// is missing, its provider is inactive, or the service has another type. A host
-// that only holds the service name at runtime reads it with Lookup instead.
+// Get reads a service with a type assertion. It reports false under the same
+// conditions as Lookup, or when the service has another type. A host that only
+// holds the service name at runtime reads it with Lookup instead.
 func (c *Context) Get[T any](name string) (T, bool) {
 	var zero T
 	binding := c.resolveService(name)
 	if binding == nil {
 		return zero, false
 	}
-	service, ok := binding.service.(T)
+	service, ok := binding.getService().(T)
 	if !ok {
 		return zero, false
 	}

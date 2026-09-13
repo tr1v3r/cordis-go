@@ -3,6 +3,7 @@ package cordis
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -64,27 +65,56 @@ type Fiber struct {
 	// Ctx is the fiber's own context, passed to the plugin body.
 	Ctx *Context
 
+	// runtime, inject and root are fixed when the fiber is constructed.
 	runtime *runtime
 	inject  map[string]struct{}
+	root    bool
 
-	mu               sync.Mutex
+	// Lifetime plumbing, also fixed at construction. Dispose calls cancel and
+	// closes done; finalizeDispose runs the terminal transition once.
+	lifecycleCtx context.Context
+	cancel       context.CancelFunc
+	done         chan struct{}
+	disposeOnce  sync.Once
+
+	// disposables is the fiber's owned effect tree: each entry pairs a label
+	// with the disposer that releases it, and nested effects become children.
+	// The pointer is fixed at construction and the list synchronizes itself,
+	// so mu does not guard it. The public Effects() exposes only the metadata,
+	// not the disposers.
+	disposables *disposableList
+
+	// mu guards the mutable fields below.
+	mu sync.Mutex
+
+	// Current generation: lifecycle state, dependency epoch, and what load
+	// derived from that epoch.
 	state            FiberState
 	err              error
 	epoch            string
-	resolvedServices map[string]*serviceBinding
 	config           any
 	rawConfig        any
-	effects          *disposableList
-	busy             bool
-	dirty            bool
-	disposed         bool
-	cleaned          bool
-	root             bool
-	current          *effectEntry
+	resolvedServices map[string]*serviceBinding
 
-	done                 chan struct{}
-	lifecycleCtx         context.Context
-	cancel               context.CancelFunc
+	// Transition driver: busy marks the owner of a pass, dirty records a rerun
+	// request, and forceReload/disposed are requests consumed by sync.
+	busy        bool
+	dirty       bool
+	forceReload bool
+	disposed    bool
+
+	// live marks a generation claimed by load and not yet released by unload.
+	// It is set before the body runs and cleared before disposers run, so it
+	// stays true for an active fiber even when it registered no effects.
+	live bool
+
+	// current is the effect whose body is running; registrations inside it
+	// become its children. It is always nil or an entry whose body is still
+	// running, so a registration can never nest under an effect that is already
+	// finished or unwound.
+	current *effectEntry
+
+	// parentEffectDisposer releases this fiber's slot in the parent's tree.
 	parentEffectDisposer Disposer
 }
 
@@ -94,8 +124,8 @@ type StatusEvent struct {
 	Old   FiberState
 }
 
-// PluginEvent is emitted as "internal/plugin" when a fiber is created or
-// disposed.
+// PluginEvent is emitted as "internal/plugin" when a fiber is created and when
+// its disposal starts, before effects are unwound.
 type PluginEvent struct {
 	Fiber *Fiber
 }
@@ -115,14 +145,16 @@ func newRootFiber(ctx *Context) *Fiber {
 		state:            StateActive,
 		root:             true,
 		resolvedServices: map[string]*serviceBinding{},
-		effects:          newDisposableList(),
+		disposables:      newDisposableList(),
+		live:             true,
 		done:             make(chan struct{}),
 		lifecycleCtx:     lifecycleCtx,
 		cancel:           cancel,
 	}
 }
 
-func newFiber(parentCtx *Context, runtime *runtime, cfg any, inject map[string]struct{}) *Fiber {
+func newFiber(parentCtx *Context, runtime *runtime, cfg any,
+	inject map[string]struct{}) *Fiber {
 	lifecycleCtx, cancel := context.WithCancel(parentCtx.fiber.lifecycleCtx)
 	fiber := &Fiber{
 		Parent:       parentCtx,
@@ -131,7 +163,7 @@ func newFiber(parentCtx *Context, runtime *runtime, cfg any, inject map[string]s
 		rawConfig:    cfg,
 		state:        StatePending,
 		epoch:        epochInactive,
-		effects:      newDisposableList(),
+		disposables:  newDisposableList(),
 		done:         make(chan struct{}),
 		lifecycleCtx: lifecycleCtx,
 		cancel:       cancel,
@@ -139,25 +171,42 @@ func newFiber(parentCtx *Context, runtime *runtime, cfg any, inject map[string]s
 	fiber.UID = parentCtx.shared.nextUID()
 	fiber.Ctx = parentCtx.Fork(runtime.name)
 	fiber.Ctx.fiber = fiber
-
-	// The parent owns the child's lifetime: disposing the parent disposes every
-	// plugin loaded beneath it.
-	// Register the child's disposal on the parent, then publish the handle under
-	// the fiber lock: a concurrent parent unload can dispose this fiber before
-	// the assignment lands, and the handle must not be lost.
-	parentEffectDisposer := parentCtx.fiber.onDispose(fiber.Dispose)
-	fiber.mu.Lock()
-	if fiber.disposed {
-		fiber.mu.Unlock()
-		parentEffectDisposer()
-	} else {
-		fiber.parentEffectDisposer = parentEffectDisposer
-		fiber.mu.Unlock()
-	}
-	parentCtx.shared.addFiber(runtime, fiber)
-	parentCtx.shared.bus.emitInternal("internal/plugin", &PluginEvent{Fiber: fiber})
-	fiber.refresh()
 	return fiber
+}
+
+// start attaches the fiber to its parent and publishes it. It returns an error
+// when the parent is already unloading or disposed, so the caller must abort
+// instead of leaving an orphan fiber behind.
+func (f *Fiber) start() error {
+	parent := f.Parent
+
+	// The parent owns the child lifetime: disposing the parent disposes every
+	// plugin loaded beneath it. Registering it as a fiber-level effect keeps
+	// concurrent loads of one plugin from adopting each other's lifetime entry;
+	// tryFiberEffect still reports an unloading parent as an error, so Load
+	// fails instead of panicking out of the constructor.
+	parentEffectDisposer, err := parent.fiber.tryFiberEffect("child",
+		func() Disposer { return f.Dispose })
+	if err != nil {
+		return err
+	}
+	f.mu.Lock()
+	if f.disposed {
+		// The parent unloaded while this fiber was attaching, so Dispose
+		// already released everything the fiber owns. It never takes a slot in
+		// its runtime: a fiber attached after its own disposal could not be
+		// removed again.
+		f.mu.Unlock()
+		parentEffectDisposer()
+		f.shared().discardRuntime(f.runtime)
+		return nil
+	}
+	f.parentEffectDisposer = parentEffectDisposer
+	f.mu.Unlock()
+	f.shared().attachFiber(f.runtime, f)
+	f.shared().bus.emitInternal("internal/plugin", &PluginEvent{Fiber: f})
+	f.refresh()
+	return nil
 }
 
 func (f *Fiber) shared() *core { return f.Ctx.shared }
@@ -219,14 +268,14 @@ func (f *Fiber) Store() map[string]any {
 	defer f.mu.Unlock()
 	services := make(map[string]any, len(f.resolvedServices))
 	for name, binding := range f.resolvedServices {
-		services[name] = binding.service
+		services[name] = binding.getService()
 	}
 	return services
 }
 
 // Effects returns the live effect metadata tree of this fiber.
 func (f *Fiber) Effects() []*EffectMeta {
-	entries := f.effects.snapshot()
+	entries := f.disposables.snapshot()
 	out := make([]*EffectMeta, 0, len(entries))
 	for _, entry := range entries {
 		out = append(out, entry.meta)
@@ -254,30 +303,69 @@ func (f *Fiber) effect(label string, body func() Disposer) Disposer {
 // The entry is published before the body runs. If the body disposes the fiber,
 // or another goroutine unloads it while the body runs, the teardown is deferred
 // to this function instead of being lost.
+//
+// Nesting is decided per registration and never on stale state: the entry
+// adopts a nested effect only while its own body runs, a registration that
+// finds a finished enclosing effect becomes a fiber-level one instead, and the
+// scope is restored to the nearest body that is still running (or to the fiber
+// level). Concurrent registrations therefore cannot attach an effect to an
+// entry that will never unwind it.
 func (f *Fiber) tryEffect(label string, body func() Disposer) (Disposer, error) {
+	return f.tryScopedEffect(label, body, true)
+}
+
+// tryFiberEffect registers an effect that belongs to the fiber itself. It takes
+// no part in effect nesting: it never becomes a scope for later registrations,
+// and it is never adopted by the scope that happens to be running.
+//
+// The child lifetime a load takes on its parent is registered this way. Loads
+// run on their own goroutines while f.current is per fiber, so a nesting
+// registration would let two concurrent loads of the same plugin adopt each
+// other's lifetime entry - disposing either fiber would then unwind the other
+// with it, through no fault of its own.
+func (f *Fiber) tryFiberEffect(label string, body func() Disposer) (Disposer, error) {
+	return f.tryScopedEffect(label, body, false)
+}
+
+// tryScopedEffect is the shared body of tryEffect and tryFiberEffect. A scoped
+// registration consults and updates f.current; an unscoped one is added to the
+// fiber's own list and leaves the scope marker alone.
+func (f *Fiber) tryScopedEffect(label string, body func() Disposer, scoped bool) (Disposer, error) {
 	f.mu.Lock()
 	if f.disposed || f.state == StateUnloading {
 		f.mu.Unlock()
 		return nil, newError(ErrInactiveEffect,
 			"cannot create effect on inactive context %q", f.Name())
 	}
-	entry := &effectEntry{meta: &EffectMeta{Label: label}}
-	parentEffect := f.current
+	entry := &effectEntry{meta: &EffectMeta{Label: label}, running: true}
+	var parentEffect *effectEntry
 	var remove func() bool
-	if parentEffect != nil {
-		// A nested effect is owned by the enclosing one, exactly like Cordis's
-		// effect collector: disposing the outer effect disposes its children.
-		parentEffect.addChild(entry)
+	if scoped {
+		parentEffect = f.current
+		if parentEffect != nil && !parentEffect.adopt(entry) {
+			// The enclosing effect finished (or was unwound) meanwhile; owning
+			// the entry there would leave its disposer unreachable.
+			parentEffect = nil
+		}
+		if parentEffect == nil {
+			_, remove = f.disposables.add(entry)
+		}
+		f.current = entry
 	} else {
-		_, remove = f.effects.add(entry)
+		_, remove = f.disposables.add(entry)
 	}
-	f.current = entry
 	f.mu.Unlock()
 
 	dispose, panicked := runEffectBody(body)
+	entry.finishBody()
 
 	f.mu.Lock()
-	f.current = parentEffect
+	if scoped && f.current == entry {
+		// Restore the enclosing scope. A registration from another goroutine may
+		// be current by now: leave it alone rather than clobbering it with this
+		// call's captured parent.
+		f.current = parentEffect.runningAncestor()
+	}
 	f.mu.Unlock()
 
 	if panicked != nil {
@@ -286,7 +374,9 @@ func (f *Fiber) tryEffect(label string, body func() Disposer) (Disposer, error) 
 		} else {
 			remove()
 		}
-		entry.abandon()
+		// The body panicked before producing a disposer, but the effects it
+		// registered before that still have to unwind.
+		f.unwindChildren(entry.abandon())
 		panic(panicked)
 	}
 	if dispose == nil {
@@ -322,7 +412,12 @@ func (f *Fiber) runDisposer(entry *effectEntry) {
 		f.callDisposer(entry, dispose)
 	}
 	// Nested effects unwind after their owner, newest first.
-	for i := len(children) - 1; i >= 0; i-- {
+	f.unwindChildren(children)
+}
+
+// unwindChildren disposes nested effects newest-first, after their owner.
+func (f *Fiber) unwindChildren(children []*effectEntry) {
+	for i := range slices.Backward(children) {
 		f.runDisposer(children[i])
 	}
 }
@@ -337,115 +432,224 @@ func (f *Fiber) callDisposer(entry *effectEntry, dispose Disposer) {
 	dispose()
 }
 
-// refresh recomputes the dependency epoch and drives a load/unload transition.
-//
-// It is re-entrant safe: nested refresh requests set a dirty flag that the
-// outermost call drains, so a plugin that provides a service another plugin
-// waits for cannot recurse without bound.
-func (f *Fiber) refresh() {
-	f.mu.Lock()
-	if f.disposed {
-		busy := f.busy
-		f.mu.Unlock()
-		if !busy {
-			// Nothing is transitioning: finish the disposal teardown here.
-			f.sync()
-		}
-		return
-	}
-	if f.busy {
-		f.dirty = true
-		f.mu.Unlock()
-		return
-	}
-	f.busy = true
-	f.mu.Unlock()
+// The per-fiber transition driver gives one caller ownership of a transition
+// pass while other callers record that another pass is needed instead of
+// starting a second one.
 
+// refresh requests one transition pass. If another pass is already running,
+// the request is recorded for that owner instead of starting a second one.
+func (f *Fiber) refresh() {
+	if f.beginTransition() {
+		f.drive()
+	}
+}
+
+// drive drains transition passes until no caller asked for another one.
+func (f *Fiber) drive() {
 	for {
+		// Begin a pass: clear the rerun marker for this transition.
 		f.mu.Lock()
 		f.dirty = false
 		f.mu.Unlock()
 
 		f.sync()
 
-		// Re-check under the same lock that clears busy: Dispose sets dirty
-		// under this lock, so either the loop sees it and unwinds, or it sees
-		// busy==false and performs the teardown itself. Both orders are safe.
+		// End a pass: keep ownership when another request arrived while sync
+		// was running; otherwise release it and stop.
 		f.mu.Lock()
-		if !f.dirty {
-			f.busy = false
+		dirty := f.dirty
+		if dirty {
 			f.mu.Unlock()
-			break
+			continue
 		}
+		f.busy = false
 		f.mu.Unlock()
+		return
 	}
 }
 
+// beginTransition tries to become the transition owner. It reports false when
+// another pass is running; that owner is marked for one more pass.
+func (f *Fiber) beginTransition() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.busy {
+		f.dirty = true
+		return false
+	}
+	f.busy = true
+	return true
+}
+
+// sync reconciles one fiber with its pending requests and current dependencies.
 func (f *Fiber) sync() {
+	// Root and runtime-less fibers do not own a plugin generation.
 	if f.root || f.runtime == nil {
 		return
 	}
 
+	// Consume pending requests first. Disposal is terminal and forceReload
+	// must be observed even when the dependency epoch is unchanged.
 	f.mu.Lock()
 	disposed := f.disposed
+	forceReload := f.forceReload
+	f.forceReload = false
 	f.mu.Unlock()
+
+	// Dispose wins over every other transition; unload finalizes the fiber.
 	if disposed {
 		f.unload()
 		return
 	}
+	// Restart and Update force a new generation even when dependencies match.
+	if forceReload {
+		f.reload()
+		return
+	}
 
-	epoch := f.computeEpoch()
+	// Resolve the current dependency generation. The returned epoch is both
+	// the decision key and the identity of this generation.
+	bindings, epoch := f.resolveInjections()
 
+	// Snapshot the comparison inputs under one lock so the decision below is
+	// based on a single observed state.
 	f.mu.Lock()
-	if f.disposed || epoch == f.epoch {
+	same := epoch == f.epoch
+	live := f.live
+	f.mu.Unlock()
+
+	switch {
+	case same:
+		// The recorded generation still matches the dependencies in place.
+		return
+	case epoch == epochInactive:
+		// Dependencies are gone; release the current generation.
+		f.applyUnload()
+	case live:
+		// A new generation is available, but the old one is still live.
+		// reload unloads it first and resolves the new world afterwards.
+		f.reload()
+	default:
+		// The fiber is clean; start the resolved generation directly.
+		f.applyLoad(bindings, epoch)
+	}
+}
+
+// applyUnload records the inactive epoch and unloads the current generation.
+func (f *Fiber) applyUnload() {
+	f.mu.Lock()
+	if f.disposed {
 		f.mu.Unlock()
 		return
 	}
-	f.epoch = epoch
+	f.epoch = epochInactive
 	f.mu.Unlock()
+	f.unload()
+}
 
-	if epoch == epochInactive {
-		f.unload()
+// applyLoad runs the plugin body for a resolved generation on a clean fiber.
+func (f *Fiber) applyLoad(bindings map[string]*serviceBinding, epoch string) {
+	f.mu.Lock()
+	if f.disposed {
+		f.mu.Unlock()
 		return
 	}
-	f.load()
+	f.mu.Unlock()
+	f.load(bindings, epoch)
 }
 
-// computeEpoch captures the identity of every provider this fiber depends on.
-// When a provider is replaced, the epoch changes and the fiber reloads.
-func (f *Fiber) computeEpoch() string {
+// reload forces an unload/reload cycle for Restart and Update. It forgets the
+// recorded generation so the new one loads even when dependencies are unchanged.
+func (f *Fiber) reload() {
+	f.unload()
+
+	f.mu.Lock()
+	if f.disposed {
+		f.mu.Unlock()
+		// Dispose set dirty; the refresh owner will run the dispose action next.
+		return
+	}
+	f.epoch = epochInactive
+	f.err = nil
+	f.mu.Unlock()
+
+	// Resolve after the old generation is gone: unload may have changed the
+	// service registry, so pre-unload bindings can already be stale.
+	bindings, epoch := f.resolveInjections()
+	if epoch == epochInactive {
+		return
+	}
+
+	// reload unloaded the previous generation at entry, so the fiber is clean
+	// here. load re-checks disposed before it starts the new body.
+	f.load(bindings, epoch)
+}
+
+// resolveInjections resolves every injected service and encodes the provider
+// identity and the binding identity into one epoch. The snapshot and epoch come
+// from the same pass, so a load never runs against an epoch that describes
+// another generation.
+func (f *Fiber) resolveInjections() (map[string]*serviceBinding, string) {
 	names := f.Inject()
+	bindings := make(map[string]*serviceBinding, len(names))
 	var builder strings.Builder
 	for _, name := range names {
-		binding := f.shared().lookupService(f.Ctx.isolateLabel(name))
+		binding := f.shared().lookupService(f.Ctx.isolateLabel(name), name)
 		if binding == nil {
-			return epochInactive
+			return nil, epochInactive
 		}
+		bindings[name] = binding
+		// The binding sequence matters as much as the provider: a provider that
+		// releases its registration and provides the name again keeps its UID,
+		// but a dependent pinned to the released object must still reload.
 		builder.WriteByte(':')
 		builder.WriteString(strconv.Itoa(binding.provider.UID))
+		builder.WriteByte('.')
+		builder.WriteString(strconv.Itoa(binding.seq))
 	}
-	return builder.String()
+	return bindings, builder.String()
 }
 
-func (f *Fiber) load() {
+// load runs one plugin generation from a dependency snapshot resolved by sync.
+//
+// The caller is the refresh owner. load still re-checks disposed and provider
+// liveness because callbacks and concurrent disposal can invalidate the decision.
+func (f *Fiber) load(bindings map[string]*serviceBinding, epoch string) {
 	f.mu.Lock()
-	f.cleaned = false
+	if f.disposed {
+		f.mu.Unlock()
+		return
+	}
+	f.live = true
 	f.mu.Unlock()
-	f.setState(StateLoading)
-
-	resolvedServices := make(map[string]*serviceBinding, len(f.inject))
-	for _, name := range f.Inject() {
-		binding := f.shared().lookupService(f.Ctx.isolateLabel(name))
-		if binding == nil {
-			// A dependency vanished between the epoch computation and now.
-			f.refresh()
-			return
+	if !f.setState(StateLoading) {
+		return
+	}
+	// Don't run the body against a provider disposed after resolution. Defense,
+	// not correctness: later deaths go through unload's unregister+notify,
+	// which marks a rerun; the check stays because it is cheap.
+	for _, binding := range bindings {
+		if binding.live() {
+			continue
 		}
-		resolvedServices[name] = binding
+		// Nothing of this generation started, so give the claim back: record the
+		// inactive epoch and return to pending. Without that the rerun pass would
+		// compare the re-resolved epoch against a committed one, match, and leave
+		// the fiber loading forever with no body and no effects.
+		f.mu.Lock()
+		f.live = false
+		f.epoch = epochInactive
+		f.mu.Unlock()
+		f.setState(StatePending)
+		f.refresh()
+		return
 	}
 
+	// The epoch is committed only now, together with the snapshot it describes:
+	// a generation that never ran its body must not look like the loaded one.
 	f.mu.Lock()
-	f.resolvedServices = resolvedServices
+	f.epoch = epoch
+	f.resolvedServices = bindings
 	raw := f.rawConfig
 	f.mu.Unlock()
 
@@ -462,7 +666,13 @@ func (f *Fiber) load() {
 		f.fail(err)
 		return
 	}
+
 	f.mu.Lock()
+	if f.disposed {
+		f.mu.Unlock()
+		f.unload()
+		return
+	}
 	f.err = nil
 	f.mu.Unlock()
 	f.setState(StateActive)
@@ -485,22 +695,35 @@ func (f *Fiber) fail(err error) {
 
 	f.mu.Lock()
 	f.err = err
+	disposed := f.disposed
 	f.mu.Unlock()
+	if disposed {
+		return
+	}
 	f.setState(StateFailed)
 	f.shared().log.errorf("cordis: plugin %s failed to load: %v", f.Name(), err)
 }
 
+// unload releases the current generation of effects.
+//
+// The caller is the refresh owner. unload is idempotent: a disposed fiber
+// finishes through finalizeDispose, otherwise it returns to pending.
 func (f *Fiber) unload() {
 	f.mu.Lock()
-	if f.cleaned {
+	if f.live {
+		f.live = false
 		f.mu.Unlock()
+	} else {
+		disposed := f.disposed
+		f.mu.Unlock()
+		if disposed {
+			f.finalizeDispose()
+		}
 		return
 	}
-	f.cleaned = true
-	f.mu.Unlock()
 
 	f.setState(StateUnloading)
-	for _, entry := range f.effects.clear() {
+	for _, entry := range f.disposables.clear() {
 		f.runDisposer(entry)
 	}
 	f.mu.Lock()
@@ -509,19 +732,39 @@ func (f *Fiber) unload() {
 	disposed := f.disposed
 	f.mu.Unlock()
 	if disposed {
-		f.setState(StateDisposed)
+		f.finalizeDispose()
 		return
 	}
 	f.setState(StatePending)
 }
 
-func (f *Fiber) setState(state FiberState) {
+// finalizeDispose drives a disposed fiber to its terminal state and releases
+// the slot it occupied in the parent's effect list. It is idempotent.
+func (f *Fiber) finalizeDispose() {
+	f.disposeOnce.Do(func() {
+		f.setState(StateDisposed)
+
+		f.mu.Lock()
+		parentEffectDisposer := f.parentEffectDisposer
+		f.parentEffectDisposer = nil
+		f.mu.Unlock()
+		if parentEffectDisposer != nil {
+			parentEffectDisposer()
+		}
+	})
+}
+
+func (f *Fiber) setState(state FiberState) bool {
 	f.mu.Lock()
+	if f.disposed && state != StateUnloading && state != StateDisposed {
+		f.mu.Unlock()
+		return false
+	}
 	old := f.state
 	f.state = state
 	f.mu.Unlock()
 	if old == state {
-		return
+		return true
 	}
 	f.shared().bus.emitInternal("internal/status", &StatusEvent{Fiber: f, Old: old})
 
@@ -529,6 +772,7 @@ func (f *Fiber) setState(state FiberState) {
 	if (old == StateActive) != (state == StateActive) {
 		f.notifyProvided()
 	}
+	return true
 }
 
 // notifyProvided re-evaluates every fiber that injects a service this fiber
@@ -539,8 +783,17 @@ func (f *Fiber) notifyProvided() {
 	}
 }
 
-// Dispose unloads the plugin and releases everything it registered. It is
-// idempotent.
+// Dispose starts unloading the plugin and releases everything it registered. It
+// is idempotent. Cancellation and the removal of the plugin from the registry
+// happen immediately; the effect teardown runs in this call for the root fiber
+// and whenever the fiber is not part of a running transition, and is otherwise
+// deferred to that transition.
+//
+// There is no "fully disposed" channel to await: for a non-root fiber Dispose
+// returns while the state may still be unloading, or before the deferred
+// teardown has run. The terminal state is observable as
+// State() == StateDisposed, which is the replacement for the removed Disposed
+// method.
 func (f *Fiber) Dispose() {
 	f.mu.Lock()
 	if f.disposed {
@@ -548,7 +801,10 @@ func (f *Fiber) Dispose() {
 		return
 	}
 	f.disposed = true
-	busy := f.busy
+	// Mark a rerun before the cancel/remove/emit steps so a running owner can
+	// start teardown without waiting for them. refresh clears the marker on the
+	// first pass when no owner is running.
+	f.dirty = true
 	f.mu.Unlock()
 
 	// Stop dependent goroutines immediately, then unwind effects.
@@ -560,48 +816,30 @@ func (f *Fiber) Dispose() {
 		f.shared().bus.emitInternal("internal/plugin", &PluginEvent{Fiber: f})
 	}
 
-	if busy {
-		// A transition is in flight. Hand the teardown to it instead of
-		// unloading concurrently with the plugin body that is still running;
-		// the loop in refresh() observes the flag and unwinds.
-		f.mu.Lock()
-		f.dirty = true
-		f.mu.Unlock()
+	if f.root {
+		f.unload()
 		return
 	}
-	f.unload()
-	f.setState(StateDisposed)
-
-	// Release the slot this child occupied in the parent's effect list, so a
-	// parent that repeatedly loads and disposes plugins does not grow forever.
-	f.mu.Lock()
-	parentEffectDisposer := f.parentEffectDisposer
-	f.parentEffectDisposer = nil
-	f.mu.Unlock()
-	if parentEffectDisposer != nil {
-		parentEffectDisposer()
-	}
+	f.refresh()
 }
 
-// Restart unloads and reloads the plugin with its current config.
+// Restart requests an unload/reload cycle with the current config. When a
+// refresh transition is already running, the request is queued and Restart
+// returns without waiting for the reload.
 func (f *Fiber) Restart() error {
 	if err := f.assertActive(); err != nil {
 		return err
 	}
-	f.unload()
 	f.mu.Lock()
-	f.epoch = epochInactive
-	f.err = nil
+	f.forceReload = true
 	f.mu.Unlock()
 	f.refresh()
 	return f.Error()
 }
 
-// Update replaces the raw config and restarts the plugin.
-//
-// A pending or failed fiber is unloaded and forced through a fresh load, because
-// its epoch may already equal the computed one and a plain refresh would then
-// no-op while silently discarding the previous error.
+// Update replaces the raw config and requests a restart. When a refresh
+// transition is already running, the request is queued and Update returns
+// without waiting for the reload.
 func (f *Fiber) Update(config any) error {
 	if err := f.assertActive(); err != nil {
 		return err
@@ -609,17 +847,10 @@ func (f *Fiber) Update(config any) error {
 	f.mu.Lock()
 	f.rawConfig = config
 	f.err = nil
+	f.forceReload = true
 	f.mu.Unlock()
-
-	if f.State() != StateActive {
-		f.unload()
-		f.mu.Lock()
-		f.epoch = epochInactive
-		f.mu.Unlock()
-		f.refresh()
-		return f.Error()
-	}
-	return f.Restart()
+	f.refresh()
+	return f.Error()
 }
 
 func (f *Fiber) assertActive() error {
@@ -646,10 +877,13 @@ func (c *core) nextUID() int {
 	return c.counter
 }
 
-func (c *core) addFiber(runtime *runtime, fiber *Fiber) {
+// attachFiber publishes a fiber under its runtime and gives back the claim its
+// load took on it.
+func (c *core) attachFiber(runtime *runtime, fiber *Fiber) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	runtime.fibers = append(runtime.fibers, fiber)
+	runtime.claims--
 }
 
 func (c *core) removeFiber(runtime *runtime, fiber *Fiber) {
@@ -661,7 +895,7 @@ func (c *core) removeFiber(runtime *runtime, fiber *Fiber) {
 			break
 		}
 	}
-	if len(runtime.fibers) == 0 {
+	if runtime.claims == 0 && len(runtime.fibers) == 0 {
 		delete(c.runtimes, runtime.definition)
 	}
 }

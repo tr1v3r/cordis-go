@@ -16,6 +16,14 @@ type eventListener struct {
 	global  bool
 	once    bool
 
+	// fired claims the listener for a single dispatch. Only the dispatcher that
+	// flips it from false to true runs the body, so two dispatchers holding a
+	// snapshot taken before the listener left the bus cannot both run it.
+	fired atomic.Bool
+	// released records that a once-listener was retired. It is published before
+	// cleanup is installed, so a dispatch that wins that race can still release
+	// the effect entry and the registration completes the release afterwards.
+	released atomic.Bool
 	// cleanup removes the listener's effect entry once a once-listener has
 	// fired, so Effects() stops reporting a handler that can never run again.
 	cleanup atomic.Pointer[Disposer]
@@ -52,7 +60,8 @@ func Global() EventOption {
 	return func(o *eventOptions) { o.global = true }
 }
 
-// WithOnce removes the listener after its first invocation.
+// WithOnce removes the listener after its first invocation and releases the
+// effect entry that keeps it alive, so Effects() stops reporting it.
 func WithOnce() EventOption {
 	return func(o *eventOptions) { o.once = true }
 }
@@ -83,6 +92,11 @@ func (c *Context) OnValue[E any](name string, fn func(E) any, opts ...EventOptio
 
 // OnWaterfall registers a listener that wraps the rest of a Waterfall chain.
 // Calling next continues the chain; not calling it vetoes the remainder.
+//
+// A chain settles at most once. Calling next again after the chain already
+// reached final returns the settled result instead of running final twice, and
+// a listener that panics after next returned is reported like any other failing
+// listener without disturbing that result.
 func (c *Context) OnWaterfall[E any](name string, fn func(E, func(E) any) any,
 	opts ...EventOption) Disposer {
 	return c.on(name, func(payload any, next func(any) any) any {
@@ -119,6 +133,12 @@ func (c *Context) on(name string, fn func(any, func(any) any) any, opts ...Event
 	})
 	cleanup := disposer
 	listener.cleanup.Store(&cleanup)
+	if options.once && listener.released.Load() {
+		// A dispatch retired the listener while its cleanup was still
+		// uninstalled and could not run it; the effect entry would otherwise
+		// outlive a handler that can never run again.
+		cleanup()
+	}
 	return disposer
 }
 
@@ -170,16 +190,39 @@ func (b *eventBus) selectListeners(name string, filter func(*eventListener) bool
 	return out
 }
 
-func (b *eventBus) invoke(listener *eventListener, payload any) (result any, err error) {
-	once := listener.once
-	if once {
-		b.remove(listener)
+// claim reserves a listener for one dispatch and reports whether the caller may
+// run it. A listener that may run more than once, or one that no dispatcher
+// claimed yet, is always handed to the caller.
+func claim(listener *eventListener) bool {
+	return !listener.once || listener.fired.CompareAndSwap(false, true)
+}
+
+// releaseOnce retires a once-listener: it leaves the bus and its effect entry is
+// disposed, so Effects() stops reporting a handler that can never run again.
+//
+// Every dispatch path releases through this method, so no path can drop the
+// effect entry. It tolerates being called before the registration installed the
+// cleanup: the release is published either way and the registration disposes the
+// entry itself. Disposers produced by this package are idempotent, so both sides
+// may run it.
+func (b *eventBus) releaseOnce(listener *eventListener) {
+	if !listener.released.CompareAndSwap(false, true) {
+		return
 	}
+	b.remove(listener)
+	if cleanup := listener.cleanup.Load(); cleanup != nil {
+		(*cleanup)()
+	}
+}
+
+func (b *eventBus) invoke(listener *eventListener, payload any) (result any, err error) {
+	if !claim(listener) {
+		return nil, nil
+	}
+	once := listener.once
 	defer func() {
 		if once {
-			if cleanup := listener.cleanup.Load(); cleanup != nil {
-				(*cleanup)()
-			}
+			b.releaseOnce(listener)
 		}
 		if reason := recover(); reason != nil {
 			err = fmt.Errorf("event %q listener panicked: %v", listener.name, reason)
@@ -191,9 +234,9 @@ func (b *eventBus) invoke(listener *eventListener, payload any) (result any, err
 
 func (b *eventBus) emitInternal(name string, payload any) {
 	for _, listener := range b.snapshot(name) {
-		if _, err := b.invoke(listener, payload); err != nil {
-			b.shared.log.errorf("cordis: %v", err)
-		}
+		// invoke reports a listener panic itself; logging the returned error
+		// here too would report the same panic twice.
+		_, _ = b.invoke(listener, payload)
 	}
 }
 
@@ -220,9 +263,9 @@ func (c *Context) EmitScoped[E any](scopeName, name string, payload E) {
 
 func emitWith[E any](c *Context, name string, payload E, filter func(*eventListener) bool) {
 	for _, listener := range c.shared.bus.selectListeners(name, filter) {
-		if _, err := c.shared.bus.invoke(listener, payload); err != nil {
-			c.shared.log.errorf("cordis: %v", err)
-		}
+		// invoke reports a listener panic itself; logging the returned error
+		// here too would report the same panic twice.
+		_, _ = c.shared.bus.invoke(listener, payload)
 	}
 }
 
@@ -242,7 +285,7 @@ func bailWith[E any](c *Context, name string, payload E,
 	for _, listener := range c.shared.bus.selectListeners(name, filter) {
 		value, err := c.shared.bus.invoke(listener, payload)
 		if err != nil {
-			c.shared.log.errorf("cordis: %v", err)
+			// invoke already reported the panic; keep dispatching.
 			continue
 		}
 		if value != nil && value != false {
@@ -307,16 +350,27 @@ func waterfallWith[E any](c *Context, name string, payload E, final func(E) any,
 	filter func(*eventListener) bool) any {
 	listeners := c.shared.bus.selectListeners(name, filter)
 	index := 0
+	// settled and settledResult latch the chain's single settlement. Cordis
+	// settles a waterfall once, but two things here can reach the final call
+	// twice: a listener that panics after next returned unwinds back into this
+	// loop, and a listener that calls next again re-enters the tail. The latch
+	// is taken before final runs, so a panicking final cannot run twice either.
+	settled := false
+	var settledResult any
 	var next func(any) any
 	next = func(value any) any {
 		for index < len(listeners) {
 			listener := listeners[index]
 			index++
-			if listener.once {
-				c.shared.bus.remove(listener)
+			if !claim(listener) {
+				continue
 			}
+			once := listener.once
 			result, err := func() (result any, err error) {
 				defer func() {
+					if once {
+						c.shared.bus.releaseOnce(listener)
+					}
 					if reason := recover(); reason != nil {
 						err = fmt.Errorf("event %q listener panicked: %v", listener.name, reason)
 					}
@@ -329,10 +383,15 @@ func waterfallWith[E any](c *Context, name string, payload E, final func(E) any,
 			}
 			return result
 		}
+		if settled {
+			return settledResult
+		}
+		settled = true
 		if final == nil {
 			return nil
 		}
-		return final(assertPayload[E](name, value))
+		settledResult = final(assertPayload[E](name, value))
+		return settledResult
 	}
 	return next(payload)
 }

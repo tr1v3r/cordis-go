@@ -40,7 +40,7 @@ fiber, err := rootCtx.Load(plugin, dbConfig{Path: "app.db"})
 | `ctx.provide(name, v)` | `ctx.Provide(name, v)` | 类型参数从 `v` 推断；返回 `(Disposer, error)`，所有权属于当前 fiber |
 | `ctx.effect(fn)` | `ctx.Effect(label, body)` | 可逆副作用 |
 | `ctx.on / emit / bail / waterfall` | `ctx.On` / `ctx.Emit` / `ctx.Bail` / `ctx.Waterfall` | 泛型事件，payload 类型在编译期确定；注册与分发都是 Context 方法，包级同名函数是等价形态 |
-| `ctx.isolate(name)` | `ctx.Isolate(name)` / `ctx.IsolateShared(name, label)` | 服务隔离，同名服务互不冲突；同一 label 可让两个作用域合并 |
+| `ctx.isolate(name)` | `ctx.Isolate(name)` / `ctx.IsolateShared(name, label)` | 服务按作用域 label 索引；同一 label 让两个作用域合并，但该 label 全应用只对应一个服务名（见「Service 与 Inject」） |
 | `ctx.extend()` | `ctx.Fork(name)` | 共享 fiber 的子上下文 |
 | `@cordisjs/plugin-loader` + `cordis.yml` | `loader` 子包 + JSON 配置 | 配置驱动装配、patch 层、config dump |
 | `Promise` / `await` | 同步调用 + `ctx.Context()` | 取消传播用 `context.Context` |
@@ -59,7 +59,8 @@ ctx.OnDispose(func() { order = append(order, "second") })
 ```
 
 `ctx.Context()` 返回一个随 fiber 一起取消的 `context.Context`，交给插件启动的 goroutine，
-这样 goroutine 的存活期和插件一致。
+它的寿命覆盖 fiber 实例的整个生命周期。注意：依赖变化导致的 unload/reload 不会取消它；
+如果某次 load 启动的 goroutine 必须随该次 load 结束，请在 `ctx.OnDispose` 里注册取消。
 
 根 fiber 的 `context.Context` 默认派生自 `context.Background()`，整棵树的寿命由调用方掌握
 （`root.Fiber().Dispose()`）。要让宿主的信号/取消来接管，用 `cordis.WithBaseContext`：
@@ -91,10 +92,16 @@ pending ──依赖就绪──> loading ──成功──> active
 - `pending`：声明的依赖还没全部就绪，插件体不执行
 - `active`：已加载，且它提供的服务对依赖者可见
 - `failed`：插件体返回错误或 panic（panic 被捕获成 error，不会炸进程）
+- `disposed`：终态，走到这里就不再重启——`fiber.Update()` / `fiber.Restart()` 返回
+  `INACTIVE_EFFECT`。`Dispose()` 是它的入口，但调用返回时未必已经落到这个状态（见下）
 - 依赖的提供者被替换时，fiber 会自动 unload → load，插件体重新执行
 
 `failed` 不是终态：`fiber.Update(cfg)` 或依赖重新就绪都会再跑一次。失败时
 `Load` 已经用 `err` 报过一次，`fiber.Error()` 保存同一个错误，直到下次加载成功才清空。
+
+`fiber.Dispose()` 会立即取消 `ctx.Context()`；如果调用时已有 refresh transition 在跑，
+effect 回收会延后到该循环。`Dispose()` 返回不代表所有 effect 已经回收完成；调用方不应
+依赖它作为资源回收完成的同步点。
 
 ### 3. Effect — 可逆副作用
 
@@ -135,6 +142,27 @@ dispose()
 **只知道服务名字**的宿主用无类型的 `ctx.Lookup(name)` / `ctx.Set(name, svc)`：Go 的方法集一个
 名字只能有一个方法，这两个名字因此留给无类型形态。
 
+⚠️ **隔离 label 的真实语义**：服务绑定表按 **label** 索引（没有隔离时 label 就是服务名本身），
+所以**同一个 label 在整个应用里只能对应一个服务名**。`IsolateShared("db", "shared")` 与
+`IsolateShared("cache", "shared")` 会落在同一个槽位上：第二次 `Provide` 报
+`SERVICE_EXISTS`，而错误信息里的 owner 是第一个绑定的提供者。用共享 label 合并作用域时，
+让 label 与服务名一一对应。
+
+#### 内置服务
+
+`cordis.New()` 已经把三个服务装进 root 作用域；它们就是普通服务，按名字注入即可：
+
+| 名字 | 类型 | 用途 |
+| --- | --- | --- |
+| `registry` | `cordis.Registry` | 插件注册表的只读视图：`Size()` / `Plugins()` |
+| `events` | `*cordis.EventService` | 事件总线本身，`Context()` 返回拥有它的上下文 |
+| `logger` | `*cordis.LoggerService` | 日志工厂：`Logger(name)` 返回带名字的 `*Logger` |
+
+```go
+rootCtx := cordis.New()
+registry := rootCtx.MustGet[cordis.Registry]("registry") // examples/hotplug 的用法
+```
+
 ### 5. Event — 带作用域过滤的事件总线
 
 `ctx.On` / `ctx.OnOnce` / `ctx.OnValue` / `ctx.OnWaterfall` **注册**，`ctx.Emit` /
@@ -173,16 +201,21 @@ tree.Dump(os.Stdout)
 fibers, err := tree.Load(rootCtx, registry)
 ```
 
-补丁语义与 Cordis 一致，有两点必须强调：
+补丁语义与 Cordis 一致，有三点必须强调：
 
 1. **`config` 整体替换，不深合并**。补丁里没写的字段不是"保留"，而是随整个 config 一起消失
    （除非补丁本身没写 `config`，此时保留原值）。
 2. **补丁 id 匹配不到条目时不会静默丢弃**。Cordis 的 include 插件会静默跳过，
    这是"配置为什么没生效"的经典坑；本库默认记为 `Tree.Warnings`，`loader.Strict()` 下直接报错。
+3. **层文件里的数字按字面量保留**。解析用 `json.Number`，所以 `Patch.Config` / `Node.Config` 里的
+   数字是 `json.Number` 而不是 `float64`：超过 2^53 的整数不会被静默取整，`Dump` 打印的也是文件里
+   写的那个值。交给插件的配置仍按目标字段类型解码，因此类型对不上（例如把 `{"count": 1.0}` 塞进
+   `int64` 字段）会在加载时报错，而不是被悄悄截断。
 
 `Tree.Dump()` 输出带来源标注，等价于 `dsh --profile <name> --dump-config`：
 
 ```
+# cordis-go config dump
 # layers: base -> profile
 - id: "server"  # from base; patched by profile
   name: "server"
@@ -191,16 +224,25 @@ fibers, err := tree.Load(rootCtx, registry)
 
 ### 命令行
 
-配置组合是纯数据操作，不需要插件注册表，因此附带一个独立的查看工具：
+配置组合是纯数据操作，不需要插件注册表，因此附带一个独立的查看工具（下面的
+`base.json` / `profile.json` 是示意路径，仓库里没有这两个文件——换成你自己的配置）：
 
 ```sh
 go run ./cmd/cordis dump base.json profile.json
 go run ./cmd/cordis dump --strict base.json profile.json   # 未匹配的补丁 id 直接报错
+go run ./cmd/cordis dump --patch=base.json base.json       # 强制第一个文件按 patch 层解析
 ```
+
+`--patch=<path>` 可以重复，被点名的文件无论出现在哪个位置（包括第一个）都按 patch 层解析。
+显式标记覆盖的只是「第一个文件按 base 层解析」这条默认规则：`.patch.json` 结尾的第一个文件
+本来就是 patch 层，标记对它没有额外影响。显式请求帮助用
+`-h` / `--help`：用法打到 stdout 并以 0 退出；用法错误（未知命令、未知 flag、缺少参数）把用法
+打到 stderr 并以 2 退出；加载或组合失败以 1 退出。
 
 输出示例（注意 `server` 的 `tls` 字段被整体替换掉了，嵌套条目也能按 id 补丁）：
 
 ```
+# cordis-go config dump
 # layers: base.json -> profile.json
 # warning: layer profile.json: patch id "typo" matched no entry
 - id: "server"  # from base.json; patched by profile.json
@@ -229,6 +271,7 @@ epoch 重载、隔离作用域、事件分发五种模式、作用域过滤、�
 | `intercept` / `accessor` / `mixin` | 未实现：三者都是围绕 Proxy 的机制，在静态类型语言里没有对应物 |
 | `Service` 基类 / `@Inject` 装饰器 | 用 `ctx.Serve` + `WithInject` 代替 |
 | 事件的 `this` 绑定 | Go 没有 `this`，需要时把上下文作为 payload 字段传入 |
+| 监听器 panic | 上游的 throw 会中断 `emit` / `bail` / `serial` / `waterfall`；本库把 panic 捕获成错误、记日志后**继续**投递给下一个监听者（`Parallel` 把 panic join 进返回的 error）。单个坏监听者不会带走整次分发，这是有意的 Go 侧差异 |
 
 ### loader 的已知限制
 
@@ -251,12 +294,13 @@ go run ./examples/hotplug
 go run ./examples/isolation
 go run ./examples/serviceprobe
 go run ./examples/walkthrough
-go run ./cmd/cordis dump base.json profile.json
+go run ./cmd/cordis dump base.json profile.json   # base.json / profile.json 是示意路径
 ```
 
 `examples/basic` 演示配置层叠加与 dump、依赖注入、事件、插件挂起与激活、卸载回收。
 `examples/events` 逐一演示 `Emit` / `Bail` / `Serial` / `Parallel` / `Waterfall` 五种分发
-模式及各自的 `*Scoped` 变体，附 `OnOnce` / `Prepend` / `Global` 与 panic 隔离。
+模式及各自的 `*Scoped` 变体，附 `OnOnce` / `Prepend` / `Global` 与 panic 隔离（panic 继续分发
+而非中断，见「与 Cordis 的差异」）。
 `examples/hotplug` 演示应用持续运行时 provider 插件消失，依赖方进入 `pending`，再注册一个
 提供同名服务的新插件后依赖方自动恢复。
 `examples/isolation` 演示默认、隔离与显式共享三种服务作用域。
@@ -277,8 +321,9 @@ make ci      # CI 跑的东西：gofmt 检查 + go vet + staticcheck + revive + 
 | `make vet` | `go vet ./...` |
 | `make lint` | gofmt 检查 + `go vet` + `staticcheck` + `revive -config .revive.toml` |
 | `make test` | `go test -race ./...` |
+| `make integration` | `go test -race -count=3 ./...`，重复跑以抖出时序问题；`.github/workflows/integration.yml` 执行 |
 | `make tools` | 安装固定版本的 staticcheck / revive |
-| `make ci` | `lint` + `test`，GitHub Actions 执行同一入口 |
+| `make ci` | `lint` + `test`，`.github/workflows/ci.yml` 执行同一入口 |
 
 风格约定由 `.revive.toml` 固化（revive 默认规则集 + **100 列**行宽上限）。
 
@@ -292,12 +337,23 @@ make ci      # CI 跑的东西：gofmt 检查 + go vet + staticcheck + revive + 
 - 需要 **Go 1.27+**：事件分发、插件加载与服务访问用泛型方法（`go.mod` 的 `go 1.27.0` 即最低
   工具链要求）
 - 零第三方依赖（`go list -m all` 只有本模块），配置解码用标准库 `encoding/json`
-- `go vet` / `go test -race` 全绿；64 个测试，核心包覆盖率 87.8%，loader 72.7%
+- `go vet` / `go test -race` 全绿。测试分两层：单元测试与跨特性集成测试（`integration_*.go`，
+  `make integration` 以 `-race -count=3` 重复跑，独立 workflow 验证）。覆盖率现场量：
+  `go test -race -cover ./...` 给出核心包 93% 上下、`loader` 92% 上下。这两个数字只是某个 dev
+  基线上的量级，会随提交变化（加一个测试就会动），所以这里不写死——要当前值就跑那条命令。
+  `examples/` 不在统计里（示例靠 `go run` 验证）；`cmd/cordis` 的退出码契约由它自己的进程内测试
+  钉住（`--help` / 用法错误 / 加载失败三档）
 - 交叉编译验证：linux/amd64、windows/amd64、darwin/arm64
 - ⚠️ 破坏性变更：`Definition` 不再导出；`ctx.Load` / `ctx.LoadWithInject` 改为泛型方法
   `(plugin, config)`；类型化服务访问改为方法形态——`ctx.Get` / `ctx.MustGet` / `ctx.Provide` /
   `ctx.ProvideChecked` / `ctx.Serve`，无类型的 `ctx.Get(name)` 由 `ctx.Lookup(name)` 取代，
   包级 `cordis.Get` / `cordis.Provide` 等签名不变（迁移说明见「Service 与 Inject」）
+- ⚠️ 行为变更（宿主可见）：`Patch.Config` / `Node.Config` 里的数字现在是 `json.Number` 而不是
+  `float64`，超过 2^53 的整数不再被静默取整，小数进整型字段会报错；断言 `.(float64)` 的宿主需要改，
+  插件侧不受影响（见「配置驱动装配」第 3 点）
+- ⚠️ 破坏性变更：`Fiber.Disposed()` 方法已删除——判断终态改用
+  `fiber.State() == cordis.StateDisposed`；`fiber.Dispose()` 只保证发起卸载，**不是**「所有
+  effect 已回收」的同步点（见「Fiber」）
 
 ## 目录结构
 
@@ -311,9 +367,9 @@ cordis-go/
 ├── logger.go             # 轻量日志服务
 ├── disposable.go         # 幂等 Disposer 与 effect 列表
 ├── funcforms.go          # 包级函数形态：转发到同名 Context 方法
-├── Makefile              # fmt / vet / lint / test / ci 入口
+├── Makefile              # fmt / vet / lint / test / integration / ci 入口
 ├── .revive.toml          # 风格规则：revive 默认集 + 100 列行宽
-├── .github/workflows/    # CI：Go 1.27，跑 make ci
+├── .github/workflows/    # CI：Go 1.27，ci.yml 跑 make ci，integration.yml 跑 make integration
 ├── loader/               # 配置驱动装配、patch 层、config dump
 ├── cmd/cordis/           # 配置 dump 命令行工具
 └── examples/

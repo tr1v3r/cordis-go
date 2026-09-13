@@ -9,6 +9,7 @@
 make tools   # 一次性：安装固定版本的 staticcheck / revive
 make ci      # 改完必须绿：gofmt 检查 + vet + staticcheck + revive + go test -race
 make fmt     # 也可以单跑某一环：make fmt / vet / lint / test
+make integration  # 跨特性集成测试：go test -race -count=3 ./...（CI 里是独立 workflow）
 ```
 
 **需要 Go 1.27+**（`go.mod` 声明 `go 1.27.0`）：事件分发、插件加载与服务访问是泛型方法，属于
@@ -31,6 +32,8 @@ make fmt     # 也可以单跑某一环：make fmt / vet / lint / test
   `cordis.Load`、`ctx.Get` / `cordis.Get`）。包级形态集中在 `funcforms.go`，它们存在的理由是能把
   助手当成 `func(*Context, ...)` 传递——方法值（`ctx.Emit[T]`）已经把接收者绑进去了，类型里没有
   ctx。上游 TS 只有方法形态，所以这是 Go 侧的补充；完整约定写在 `doc.go`。
+  **例外是 `Inject`**：它只有 `registry.go` 里的包级形态（对应 Cordis 的 `ctx.inject`），没有
+  `ctx.Inject` 方法孪生——别为对称补一个，也别把它挪进 `funcforms.go`。
 - **一个名字只能有一个方法**：服务族全部是泛型方法（`ctx.Get` / `ctx.MustGet` / `ctx.Provide` /
   `ctx.ProvideChecked` / `ctx.Serve`），运行期按名字访问因此只能占用别的名字——无类型读取是
   `ctx.Lookup`，改写自有服务是 `ctx.Set`。别再给 `Context` 加无类型的 `Get` / `Provide`：那会和
@@ -44,7 +47,8 @@ make fmt     # 也可以单跑某一环：make fmt / vet / lint / test
 
 `.revive.toml` 是唯一权威（revive 默认规则集 + **100 列**上限）：
 
-- Go 源码的注释与输出**一律英文**；`README.md` 是本仓库唯一的中文文件。
+- Go 源码的注释与输出**一律英文**；`README.md` 是唯一面向使用者的中文文档，本文件 `AGENTS.md`
+  （以及指向它的 `CLAUDE.md`）是面向编码代理的中文指南。
 - 导出符号要有文档注释，以符号名开头、以句号结尾；非导出函数按需写，别为凑格式补噪音。
 - 测试失败信息统一 `want X, got Y`。
 - 提交信息用 Conventional Commits，正文讲**为什么**；破坏性变更加 `!` 并写 `BREAKING CHANGE:`。
@@ -59,7 +63,7 @@ make fmt     # 也可以单跑某一环：make fmt / vet / lint / test
 | --- | --- |
 | 加一种事件分发模式 | `events.go`（方法 + `*Scoped` 变体）+ `funcforms.go` 的等价转发，同步 `doc.go` 的约定段、`examples/events`、以及方法/函数形态的对拍测试 |
 | 改包级转发形态 | `funcforms.go`——方法本体留在各自文件里，这里只放转发 |
-| 改公开 API 形态 | 先读 `doc.go` 的泛型约定：泛型入口一律「方法 + `funcforms.go` 的包级孪生」，运行期按名字的无类型形态走 `Lookup` / `Set` |
+| 改公开 API 形态 | 先读 `doc.go` 的泛型约定：泛型入口一律「方法 + `funcforms.go` 的包级孪生」（`Inject` 是唯一例外，只有 `registry.go` 里的包级形态），运行期按名字的无类型形态走 `Lookup` / `Set` |
 | 加示例 | `examples/<名字>/main.go`，同步 README 的运行节与目录树，并保证能直接 `go run` |
 | 改配置装配 | `loader/loader.go`——`Register[C]` 的注册期擦除是关键 |
 | 调 lint 规则 | `.revive.toml`；规则选项语法是 `arguments = [...]` 而不是 `max = ...`（写错会静默退回默认 80 列） |

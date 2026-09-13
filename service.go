@@ -1,6 +1,9 @@
 package cordis
 
-import "fmt"
+import (
+	"fmt"
+	"sync"
+)
 
 // serviceBinding associates a service name and scope with its provider and
 // concrete service object.
@@ -10,6 +13,33 @@ type serviceBinding struct {
 	provider          *Fiber
 	service           any
 	availabilityCheck func() bool
+	// seq identifies this registration among all others, so a dependency epoch
+	// can tell a rebound service from the binding it replaced even when the same
+	// fiber provides it again.
+	seq int
+
+	mu sync.RWMutex
+	// panicked records that a panicking availability check was already
+	// reported. It is guarded by mu.
+	panicked bool
+
+	// log reports a panicking availability check. It lives on the binding
+	// because available() is reached from paths that hold no core reference.
+	log *loggerService
+}
+
+// getService returns the current service value.
+func (b *serviceBinding) getService() any {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.service
+}
+
+// setService replaces the current service value.
+func (b *serviceBinding) setService(service any) {
+	b.mu.Lock()
+	b.service = service
+	b.mu.Unlock()
 }
 
 func provide(c *Context, name string, service any,
@@ -25,6 +55,8 @@ func provide(c *Context, name string, service any,
 		provider:          ownerFiber,
 		service:           service,
 		availabilityCheck: availabilityCheck,
+		seq:               c.shared.nextBindingSeq(),
+		log:               c.shared.log,
 	}
 
 	// Report a dead owner as a typed error rather than panicking out of a
@@ -72,17 +104,42 @@ func provide(c *Context, name string, service any,
 func setService(c *Context, name string, service any) error {
 	scopeLabel := c.isolateLabel(name)
 	binding := c.shared.getServiceBinding(scopeLabel)
-	if binding == nil {
+	// A binding registered under another name is not this service, so a Set for
+	// an unknown name must not overwrite the service that shares its label.
+	if binding == nil || binding.name != name {
 		return newError(ErrServiceMissing, "cannot set service %q before it is provided", name)
 	}
 	if binding.provider != c.fiber {
 		return newError(ErrServiceOwnership, "cannot set service %q from another fiber", name)
 	}
-	c.shared.mu.Lock()
-	binding.service = service
-	c.shared.mu.Unlock()
-	c.shared.notify(name, scopeLabel)
-	return nil
+	if c.shared.updateService(binding, service) {
+		c.shared.notify(name, scopeLabel)
+		return nil
+	}
+	return newError(ErrServiceMissing,
+		"cannot set service %q: the provider changed while updating", name)
+}
+
+// updateService replaces the value of binding only while it is still the
+// registered binding for its scope. It reports false when another provider
+// replaced the binding between lookup and update.
+func (c *core) updateService(binding *serviceBinding, service any) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	current := c.serviceBindings[binding.scopeLabel]
+	if current == binding {
+		binding.setService(service)
+		return true
+	}
+	return false
+}
+
+// nextBindingSeq hands out binding identities in registration order.
+func (c *core) nextBindingSeq() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.bindingSeq++
+	return c.bindingSeq
 }
 
 func (c *core) registerService(binding *serviceBinding) error {
@@ -114,11 +171,14 @@ func (c *core) getServiceBinding(scopeLabel string) *serviceBinding {
 	return c.serviceBindings[scopeLabel]
 }
 
-// lookupService returns a binding only while its provider is active and its
-// availability predicate, if any, passes.
-func (c *core) lookupService(scopeLabel string) *serviceBinding {
+// lookupService returns the binding registered for name in scopeLabel, but only
+// while its provider is active and its availability predicate, if any, passes.
+// A label carries one service name, so a binding registered under another name
+// is not this service: reporting it would alias every name isolated onto that
+// label onto a single service.
+func (c *core) lookupService(scopeLabel, name string) *serviceBinding {
 	binding := c.getServiceBinding(scopeLabel)
-	if binding == nil {
+	if binding == nil || binding.name != name {
 		return nil
 	}
 	if binding.provider != nil && binding.provider.State() != StateActive {
@@ -130,17 +190,46 @@ func (c *core) lookupService(scopeLabel string) *serviceBinding {
 	return binding
 }
 
-func (binding *serviceBinding) available() bool {
-	return binding.availabilityCheck == nil || runCheck(binding.availabilityCheck)
+// available reports whether the binding's availability predicate currently
+// passes. A predicate that panics counts as unavailable, so a broken probe
+// hides the service instead of taking the caller down.
+func (b *serviceBinding) available() bool {
+	if b.availabilityCheck == nil {
+		return true
+	}
+	return b.runCheck()
 }
 
-func runCheck(check func() bool) (ok bool) {
+// live reports whether the binding still resolves to an active provider.
+func (b *serviceBinding) live() bool {
+	return b.provider != nil && b.provider.State() == StateActive && b.available()
+}
+
+// runCheck invokes the availability predicate, converting a panic into
+// "unavailable". available() runs on every service resolution, so the panic is
+// reported once per binding instead of on every check.
+func (b *serviceBinding) runCheck() (ok bool) {
 	defer func() {
-		if recover() != nil {
+		if reason := recover(); reason != nil {
 			ok = false
+			b.reportPanic(reason)
 		}
 	}()
-	return check()
+	return b.availabilityCheck()
+}
+
+// reportPanic logs the first panic of this binding's availability predicate.
+// Later panics still count as unavailable but stay silent, so a permanently
+// broken probe cannot flood the log.
+func (b *serviceBinding) reportPanic(reason any) {
+	b.mu.Lock()
+	first := !b.panicked
+	b.panicked = true
+	b.mu.Unlock()
+	if first {
+		b.log.errorf("cordis: availability check of service %q panicked: %v",
+			b.name, reason)
+	}
 }
 
 // providedNames lists the services a fiber currently owns.
