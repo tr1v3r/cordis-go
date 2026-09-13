@@ -24,6 +24,11 @@ const patchJSON = `[
   {"id": "typo", "config": {"nope": true}}
 ]`
 
+// matchedJSON is a patch layer whose only id matches the base's nested entry.
+const matchedJSON = `[
+  {"id": "metrics", "config": {"interval": "2s"}}
+]`
+
 // runCapture runs the command line in-process and captures what it wrote.
 func runCapture(t *testing.T, args ...string) (code int, stdout, stderr string) {
 	t.Helper()
@@ -225,5 +230,123 @@ func TestRunPatchFlagForcesPatchModeForTheFirstFile(t *testing.T) {
 	}
 	if strings.Contains(stdout, `- id: "typo"`) {
 		t.Errorf("want no entry created by a patch layer, got %q", stdout)
+	}
+}
+
+func TestRunPatchJSONSuffixMakesTheFirstFileAPatchLayer(t *testing.T) {
+	// The documented suffix rule: a first file named *.patch.json is a patch
+	// layer without any flag, while the same content without the suffix is a
+	// base layer that creates entries. The patch ids in the file are the
+	// observable proof either way.
+	dir := t.TempDir()
+	solo := filepath.Join(dir, "solo.patch.json")
+	if err := os.WriteFile(solo, []byte(patchJSON), 0o600); err != nil {
+		t.Fatalf("write fixture %s: %v", solo, err)
+	}
+
+	code, stdout, stderr := runCapture(t, "dump", solo)
+	if code != 0 {
+		t.Fatalf("want exit 0, got %d (stderr %q)", code, stderr)
+	}
+	if stderr != "" {
+		t.Errorf("want empty stderr on success, got %q", stderr)
+	}
+	if layerList := "# layers: " + solo + "\n"; !strings.Contains(stdout, layerList) {
+		t.Errorf("want the file listed as the only layer %q, got %q", layerList, stdout)
+	}
+	for _, id := range []string{"metrics", "typo"} {
+		want := `# warning: layer ` + solo + `: patch id "` + id + `" matched no entry`
+		if !strings.Contains(stdout, want) {
+			t.Errorf("want patch warning %q, got %q", want, stdout)
+		}
+	}
+	if strings.Contains(stdout, `- id: "typo"`) {
+		t.Errorf("want no entry created by a patch layer, got %q", stdout)
+	}
+}
+
+func TestRunPatchFlagIsPositionAndRepetitionInsensitive(t *testing.T) {
+	// --patch must force patch mode wherever the flag appears on the command
+	// line, and repeated flags must not change how any file is read, so
+	// equivalent command lines must produce identical dumps.
+	base, patch := writeLayers(t)
+
+	// The flag after the file forces the same patch-only compose as before it.
+	_, wantOut, _ := runCapture(t, "dump", "--patch="+patch, patch)
+	code, stdout, stderr := runCapture(t, "dump", patch, "--patch="+patch)
+	if code != 0 {
+		t.Fatalf("want exit 0 with the flag after the file, got %d (stderr %q)", code, stderr)
+	}
+	if stderr != "" {
+		t.Errorf("want empty stderr on success, got %q", stderr)
+	}
+	if stdout != wantOut {
+		t.Errorf("want the same dump with the flag after the file, got %q want %q",
+			stdout, wantOut)
+	}
+
+	// A flag naming an already patch-position file must change nothing.
+	_, wantOut, _ = runCapture(t, "dump", base, patch)
+	code, stdout, stderr = runCapture(t, "dump", base, "--patch="+patch, patch)
+	if code != 0 {
+		t.Fatalf("want exit 0 with the flag on a later file, got %d (stderr %q)", code, stderr)
+	}
+	if stdout != wantOut {
+		t.Errorf("want the plain two-layer dump when the flag names the later file, got %q want %q",
+			stdout, wantOut)
+	}
+
+	// Repeated flags with distinct values must compose identically wherever
+	// they are interleaved with the files. Forcing the first file leaves the
+	// compose without a base layer, so both spellings dump two patch layers.
+	_, wantOut, _ = runCapture(t, "dump", "--patch="+base, "--patch="+patch, base, patch)
+	code, stdout, stderr = runCapture(t, "dump", "--patch="+base, base, "--patch="+patch, patch)
+	if code != 0 {
+		t.Fatalf("want exit 0 with repeated flags, got %d (stderr %q)", code, stderr)
+	}
+	if stdout != wantOut {
+		t.Errorf("want the same dump with repeated flags interleaved, got %q want %q",
+			stdout, wantOut)
+	}
+	if layers := "# layers: " + base + " -> " + patch + "\n"; !strings.Contains(stdout, layers) {
+		t.Errorf("want both forced files listed as layers %q, got %q", layers, stdout)
+	}
+}
+
+func TestRunStrictOnlyFailsOnUnmatchedPatchIDs(t *testing.T) {
+	// --strict widens unmatched patch ids into errors; it must keep composing
+	// cleanly when nothing is unmatched, whether there are no patch layers at
+	// all or only matching ones.
+	base, _ := writeLayers(t)
+	matched := filepath.Join(t.TempDir(), "matched.json")
+	if err := os.WriteFile(matched, []byte(matchedJSON), 0o600); err != nil {
+		t.Fatalf("write fixture %s: %v", matched, err)
+	}
+	cases := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"no patch layers", []string{"dump", "--strict", base}, ""},
+		{"only matching patch ids", []string{"dump", "--strict", base, matched},
+			"patched by " + matched},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			code, stdout, stderr := runCapture(t, tc.args...)
+			if code != 0 {
+				t.Fatalf("want exit 0, got %d (stderr %q)", code, stderr)
+			}
+			if stderr != "" {
+				t.Errorf("want empty stderr, got %q", stderr)
+			}
+			if strings.Contains(stdout, "# warning") {
+				t.Errorf("want no warnings under --strict, got %q", stdout)
+			}
+			if tc.want != "" && !strings.Contains(stdout, tc.want) {
+				t.Errorf("want strict to keep the applied patch, want %q, got %q",
+					tc.want, stdout)
+			}
+		})
 	}
 }
