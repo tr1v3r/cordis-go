@@ -1,6 +1,7 @@
 package loader_test
 
 import (
+	"encoding/json"
 	"errors"
 	"reflect"
 	"strings"
@@ -206,6 +207,103 @@ func TestParseLayerJSON(t *testing.T) {
 	}
 	if len(layer.Entries[1].Insert) != 1 {
 		t.Fatal("insert not parsed")
+	}
+}
+
+// TestLoadKeepsNegativeLargeJSONIntegersExact covers the sign side of the
+// float64 trap, through the patch-layer entry point: -9007199254740993 rounds
+// in a float64 just as its positive twin does, and the composed config must
+// hold the exact literal as a json.Number for hosts reading the maps directly.
+func TestLoadKeepsNegativeLargeJSONIntegersExact(t *testing.T) {
+	const want = int64(-9007199254740993)
+	base := loader.Layer{Label: "base", Entries: []*loader.Patch{{
+		ID: "neg", Name: strptr("numbers"),
+	}}}
+	patch, err := loader.ParsePatchLayer("file", []byte(`[
+	  {"id": "neg", "config": {"count": -9007199254740993}}
+	]`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tree, err := loader.Compose([]loader.Layer{base, patch})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	stored, ok := tree.Find("neg").Config["count"].(json.Number)
+	if !ok {
+		t.Fatalf("want a json.Number in the composed config, got %T",
+			tree.Find("neg").Config["count"])
+	}
+	if stored.String() != "-9007199254740993" {
+		t.Fatalf("want the exact literal -9007199254740993, got %s", stored)
+	}
+
+	var got numbersConfig
+	registry := loader.NewRegistry()
+	loader.MustRegister(registry, "numbers",
+		cordis.Define[numbersConfig]("numbers", func(_ *cordis.Context, cfg numbersConfig) error {
+			got = cfg
+			return nil
+		}))
+	if _, err := tree.Load(cordis.New(), registry); err != nil {
+		t.Fatal(err)
+	}
+	if got.Count != want {
+		t.Fatalf("want count %d, got %d", want, got.Count)
+	}
+}
+
+// TestLoadDecodesFractionalLiteralsByTargetType pins what exact decoding means
+// for literals that are not integers: a float64 field keeps taking them, while
+// an int64 field now refuses the literal instead of accepting a value the file
+// never wrote - the documented behavior change that came with exactness.
+func TestLoadDecodesFractionalLiteralsByTargetType(t *testing.T) {
+	layer, err := loader.ParseLayer("file", []byte(`[
+	  {"id": "frac", "name": "floats", "config": {"ratio": 1.0, "scaled": 2e2}}
+	]`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tree, err := loader.Compose([]loader.Layer{layer})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	type floatsConfig struct {
+		Ratio  float64 `json:"ratio"`
+		Scaled float64 `json:"scaled"`
+	}
+	var got floatsConfig
+	registry := loader.NewRegistry()
+	loader.MustRegister(registry, "floats",
+		cordis.Define[floatsConfig]("floats", func(_ *cordis.Context, cfg floatsConfig) error {
+			got = cfg
+			return nil
+		}))
+	if _, err := tree.Load(cordis.New(), registry); err != nil {
+		t.Fatal(err)
+	}
+	if got.Ratio != 1.0 || got.Scaled != 200 {
+		t.Fatalf("want ratio 1 and scaled 200, got %+v", got)
+	}
+
+	loader.MustRegister(registry, "numbers",
+		cordis.Define[numbersConfig]("numbers", func(_ *cordis.Context, _ numbersConfig) error {
+			return nil
+		}))
+	fractional, err := loader.ParseLayer("file", []byte(`[
+	  {"id": "int", "name": "numbers", "config": {"count": 1.0}}
+	]`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fractionalTree, err := loader.Compose([]loader.Layer{fractional})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fractionalTree.Load(cordis.New(), registry); err == nil {
+		t.Fatal("want an error: a fractional literal must not decode into an int64 field")
 	}
 }
 
