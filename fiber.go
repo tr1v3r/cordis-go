@@ -355,27 +355,36 @@ func (f *Fiber) callDisposer(entry *effectEntry, dispose Disposer) {
 
 // sync reconciles one fiber with its pending requests and current dependencies.
 func (f *Fiber) sync() {
+	// Root and runtime-less fibers do not own a plugin generation.
 	if f.root || f.runtime == nil {
 		return
 	}
 
-	// Consume terminal and forced-reload requests before reading dependencies.
+	// Consume pending requests first. Disposal is terminal and forceReload
+	// must be observed even when the dependency epoch is unchanged.
 	f.mu.Lock()
 	disposed := f.disposed
 	forceReload := f.forceReload
 	f.forceReload = false
 	f.mu.Unlock()
+
+	// Dispose wins over every other transition; unload finalizes the fiber.
 	if disposed {
 		f.unload()
 		return
 	}
+	// Restart and Update force a new generation even when dependencies match.
 	if forceReload {
 		f.reload()
 		return
 	}
 
+	// Resolve the current dependency generation. The returned epoch is both
+	// the decision key and the identity of this generation.
 	bindings, epoch := f.resolveInjections()
 
+	// Snapshot the comparison inputs under one lock so the decision below is
+	// based on a single observed state.
 	f.mu.Lock()
 	same := epoch == f.epoch
 	hasEffects := f.hasEffects
@@ -383,12 +392,17 @@ func (f *Fiber) sync() {
 
 	switch {
 	case same:
+		// The recorded generation still matches the dependencies in place.
 		return
 	case epoch == epochInactive:
+		// Dependencies are gone; release the current generation.
 		f.applyUnload()
 	case hasEffects:
+		// A new generation is available, but the old one is still live.
+		// reload unloads it first and resolves the new world afterwards.
 		f.reload()
 	default:
+		// The fiber is clean; start the resolved generation directly.
 		f.applyLoad(bindings, epoch)
 	}
 }
