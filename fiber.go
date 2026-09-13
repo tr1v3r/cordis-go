@@ -122,7 +122,8 @@ func newRootFiber(ctx *Context) *Fiber {
 	}
 }
 
-func newFiber(parentCtx *Context, runtime *runtime, cfg any, inject map[string]struct{}) *Fiber {
+func newFiber(parentCtx *Context, runtime *runtime, cfg any,
+	inject map[string]struct{}) (*Fiber, error) {
 	lifecycleCtx, cancel := context.WithCancel(parentCtx.fiber.lifecycleCtx)
 	fiber := &Fiber{
 		Parent:       parentCtx,
@@ -141,11 +142,14 @@ func newFiber(parentCtx *Context, runtime *runtime, cfg any, inject map[string]s
 	fiber.Ctx.fiber = fiber
 
 	// The parent owns the child's lifetime: disposing the parent disposes every
-	// plugin loaded beneath it.
-	// Register the child's disposal on the parent, then publish the handle under
-	// the fiber lock: a concurrent parent unload can dispose this fiber before
-	// the assignment lands, and the handle must not be lost.
-	parentEffectDisposer := parentCtx.fiber.onDispose(fiber.Dispose)
+	// plugin loaded beneath it. Use tryEffect so a parent that starts unloading
+	// during Load returns an error instead of panicking out of the constructor.
+	parentEffectDisposer, err := parentCtx.fiber.tryEffect("child",
+		func() Disposer { return fiber.Dispose })
+	if err != nil {
+		cancel()
+		return nil, err
+	}
 	fiber.mu.Lock()
 	if fiber.disposed {
 		fiber.mu.Unlock()
@@ -157,9 +161,8 @@ func newFiber(parentCtx *Context, runtime *runtime, cfg any, inject map[string]s
 	parentCtx.shared.addFiber(runtime, fiber)
 	parentCtx.shared.bus.emitInternal("internal/plugin", &PluginEvent{Fiber: fiber})
 	fiber.refresh()
-	return fiber
+	return fiber, nil
 }
-
 func (f *Fiber) shared() *core { return f.Ctx.shared }
 
 // State returns the current lifecycle state.

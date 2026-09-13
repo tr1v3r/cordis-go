@@ -147,7 +147,10 @@ func load(parentCtx *Context, definition definition, config any, extra []string)
 	if err != nil {
 		return nil, err
 	}
-	fiber := newFiber(parentCtx, runtime, config, inject)
+	fiber, err := newFiber(parentCtx, runtime, config, inject)
+	if err != nil {
+		return nil, err
+	}
 	if fiber.State() == StateFailed {
 		// Cordis surfaces a startup error through fiber.await(); a synchronous
 		// Load has no later await point, so it must return the error here or a
