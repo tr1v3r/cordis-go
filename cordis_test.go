@@ -599,6 +599,129 @@ func TestLoadMethodFormsMatchFunctionForms(t *testing.T) {
 	}
 }
 
+func TestServiceMethodFormsMatchFunctionForms(t *testing.T) {
+	root := cordis.New()
+
+	// Provide: the type parameter is inferred in both spellings, and a caller
+	// that only holds the service as an any value registers it just as well.
+	methodDispose, err := root.Provide("method", &fakeDB{name: "method"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	functionDispose, err := cordis.Provide(root, "function", &fakeDB{name: "function"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := root.Provide("dynamic", any(&fakeDB{name: "dynamic"})); err != nil {
+		t.Fatal(err)
+	}
+
+	// Get and Lookup read the same registration back.
+	methodDB, ok := root.Get[*fakeDB]("method")
+	if !ok {
+		t.Fatal("Get method form: want a service, got none")
+	}
+	functionDB, ok := cordis.Get[*fakeDB](root, "function")
+	if !ok {
+		t.Fatal("Get function form: want a service, got none")
+	}
+	if methodDB.name != "method" || functionDB.name != "function" {
+		t.Fatalf("want method and function, got %q and %q", methodDB.name, functionDB.name)
+	}
+	dynamicDB, ok := root.Get[*fakeDB]("dynamic")
+	if !ok || dynamicDB.name != "dynamic" {
+		t.Fatalf("any-typed provide: want dynamic, got %v ok=%v", dynamicDB, ok)
+	}
+	if got, ok := root.Lookup("method"); !ok || got != methodDB {
+		t.Fatalf("Lookup: want %v, got %v ok=%v", methodDB, got, ok)
+	}
+	if got, ok := root.Get[*startableService]("method"); ok || got != nil {
+		t.Fatalf("type mismatch: want no service, got %v ok=%v", got, ok)
+	}
+
+	// MustGet reports the same panic in both spellings.
+	if got := root.MustGet[*fakeDB]("function"); got != functionDB {
+		t.Fatalf("MustGet method form: want %v, got %v", functionDB, got)
+	}
+	if got := cordis.MustGet[*fakeDB](root, "method"); got != methodDB {
+		t.Fatalf("MustGet function form: want %v, got %v", methodDB, got)
+	}
+	wantServiceMissingPanic(t, func() { root.MustGet[*fakeDB]("missing") })
+	wantServiceMissingPanic(t, func() { cordis.MustGet[*fakeDB](root, "missing") })
+
+	// ProvideChecked hides the service while its predicate fails, in both forms.
+	available := false
+	check := func() bool { return available }
+	if _, err := root.ProvideChecked("checked-method", &fakeDB{name: "checked"},
+		check); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cordis.ProvideChecked(root, "checked-function", &fakeDB{name: "checked"},
+		check); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := root.Get[*fakeDB]("checked-method"); ok {
+		t.Fatal("method form: an unavailable service must not resolve")
+	}
+	if _, ok := cordis.Get[*fakeDB](root, "checked-function"); ok {
+		t.Fatal("function form: an unavailable service must not resolve")
+	}
+	available = true
+	if _, ok := root.Get[*fakeDB]("checked-method"); !ok {
+		t.Fatal("method form: the service must resolve once available")
+	}
+	if _, ok := cordis.Get[*fakeDB](root, "checked-function"); !ok {
+		t.Fatal("function form: the service must resolve once available")
+	}
+
+	// Serve runs the lifecycle hooks in both spellings.
+	methodService := &startableService{}
+	served, err := root.Serve("serve-method", methodService)
+	if err != nil || served != methodService {
+		t.Fatalf("Serve method form: want the service back, got %v (%v)", served, err)
+	}
+	functionService := &startableService{}
+	served, err = cordis.Serve(root, "serve-function", functionService)
+	if err != nil || served != functionService {
+		t.Fatalf("Serve function form: want the service back, got %v (%v)", served, err)
+	}
+	if !methodService.started || !functionService.started {
+		t.Fatalf("Serve must call Start in both forms: %v and %v",
+			methodService.started, functionService.started)
+	}
+
+	methodDispose()
+	functionDispose()
+	if _, ok := root.Get[*fakeDB]("method"); ok {
+		t.Fatal("dispose must unregister the method-form service")
+	}
+	if _, ok := cordis.Get[*fakeDB](root, "function"); ok {
+		t.Fatal("dispose must unregister the function-form service")
+	}
+
+	root.Fiber().Dispose()
+	if !methodService.stopped || !functionService.stopped {
+		t.Fatalf("dispose must call Stop in both forms: %v and %v",
+			methodService.stopped, functionService.stopped)
+	}
+}
+
+// wantServiceMissingPanic asserts that fn panics with the SERVICE_MISSING code.
+func wantServiceMissingPanic(t *testing.T, fn func()) {
+	t.Helper()
+	defer func() {
+		reason := recover()
+		if reason == nil {
+			t.Fatal("want a panic for a missing service")
+		}
+		err, ok := reason.(*cordis.Error)
+		if !ok || err.Code != cordis.ErrServiceMissing {
+			t.Fatalf("want SERVICE_MISSING, got %v", reason)
+		}
+	}()
+	fn()
+}
+
 func TestContextCancelledOnDispose(t *testing.T) {
 	root := cordis.New()
 	stopped := make(chan struct{})

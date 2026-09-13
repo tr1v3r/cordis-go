@@ -31,7 +31,7 @@ func (g *greeter) Stop() error {
 }
 
 func value(ctx *cordis.Context, name string) string {
-	got, ok := cordis.Get[*db](ctx, name)
+	got, ok := ctx.Get[*db](name)
 	if !ok {
 		return "<unavailable>"
 	}
@@ -45,10 +45,10 @@ func main() {
 	_, _ = rootCtx.Load(
 		cordis.Define[struct{}]("self", func(ctx *cordis.Context, _ struct{}) error {
 			me := &db{"self"}
-			if _, err := cordis.Provide[*db](ctx, "own", me); err != nil {
+			if _, err := ctx.Provide("own", me); err != nil {
 				return err
 			}
-			got, ok := cordis.Get[*db](ctx, "own")
+			got, ok := ctx.Get[*db]("own")
 			fmt.Printf("① provider sees own service: ok=%v same=%v\n", ok, got == me)
 			return nil
 		}), struct{}{})
@@ -56,12 +56,12 @@ func main() {
 	// ② Two providers, one name: the second one fails and names the owner.
 	providerFiberA, _ := rootCtx.Load(
 		cordis.Define[struct{}]("owner-a", func(ctx *cordis.Context, _ struct{}) error {
-			_, err := cordis.Provide[*db](ctx, "db", &db{"A"})
+			_, err := ctx.Provide("db", &db{"A"})
 			return err
 		}), struct{}{})
 	duplicateProviderFiber, err := rootCtx.Load(
 		cordis.Define[struct{}]("owner-b", func(ctx *cordis.Context, _ struct{}) error {
-			_, err := cordis.Provide[*db](ctx, "db", &db{"B"})
+			_, err := ctx.Provide("db", &db{"B"})
 			return err
 		}), struct{}{})
 	fmt.Printf("② duplicate provide: state=%s err=%v\n", duplicateProviderFiber.State(), err)
@@ -81,7 +81,7 @@ func main() {
 
 	_, _ = rootCtx.Load(
 		cordis.Define[struct{}]("owner-a2", func(ctx *cordis.Context, _ struct{}) error {
-			_, err := cordis.Provide[*db](ctx, "db", &db{"A2"})
+			_, err := ctx.Provide("db", &db{"A2"})
 			return err
 		}), struct{}{})
 	fmt.Printf("③ provider provided again-> dependent=%s runs=%d\n", dependentFiber.State(), runs)
@@ -92,7 +92,7 @@ func main() {
 	_, _ = rootCtx.Load(
 		cordis.Define[struct{}]("cache", func(ctx *cordis.Context, _ struct{}) error {
 			cacheCtx = ctx
-			_, err := cordis.Provide[*db](ctx, "cached", &db{"v1"})
+			_, err := ctx.Provide("cached", &db{"v1"})
 			return err
 		}), struct{}{})
 	consumed := 0
@@ -115,7 +115,7 @@ func main() {
 	_, _ = rootCtx.Load(
 		cordis.Define[struct{}]("flaky", func(ctx *cordis.Context, _ struct{}) error {
 			flakyCtx = ctx
-			_, err := cordis.ProvideChecked[*db](ctx, "flaky", &db{"f"},
+			_, err := ctx.ProvideChecked("flaky", &db{"f"},
 				func() bool { return ready.Load() })
 			return err
 		}), struct{}{})
@@ -136,7 +136,7 @@ func main() {
 	// ⑥ Serve runs the Start/Stop hooks around the registration.
 	greeterFiber, _ := rootCtx.Load(
 		cordis.Define[struct{}]("greeter", func(ctx *cordis.Context, _ struct{}) error {
-			_, err := cordis.Serve[*greeter](ctx, "greeter", &greeter{"greeter"})
+			_, err := ctx.Serve("greeter", &greeter{"greeter"})
 			return err
 		}), struct{}{})
 	greeterFiber.Dispose()

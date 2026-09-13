@@ -34,14 +34,14 @@ type greetRequest struct {
 
 func main() {
 	rootCtx := cordis.New()
-	registry := cordis.MustGet[cordis.Registry](rootCtx, "registry")
+	registry := rootCtx.MustGet[cordis.Registry]("registry")
 
 	activations := 0
 	clientPlugin := cordis.Define[struct{}]("greeter-client",
 		func(ctx *cordis.Context, _ struct{}) error {
 			activations++
 			activation := activations
-			greeter := cordis.MustGet[Greeter](ctx, "greeter")
+			greeter := ctx.MustGet[Greeter]("greeter")
 			fmt.Printf("client activation #%d uses %s\n", activation, greeter.Version())
 
 			ctx.OnValue("greet", func(request greetRequest) any {
@@ -86,7 +86,7 @@ func main() {
 
 func newGreeterPlugin(name string, service Greeter) *cordis.Plugin[struct{}] {
 	return cordis.Define[struct{}](name, func(ctx *cordis.Context, _ struct{}) error {
-		_, err := cordis.Provide[Greeter](ctx, "greeter", service)
+		_, err := ctx.Provide("greeter", service)
 		return err
 	})
 }
