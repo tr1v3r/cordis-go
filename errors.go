@@ -7,14 +7,11 @@ type ErrorCode string
 
 // Framework error codes.
 const (
-	// ErrInactiveEffect means the operation needs a live fiber but the fiber is
-	// already disposed or is unloading. The registration helpers that go through
-	// fiber.effect - ctx.On, ctx.OnOnce, ctx.OnValue, ctx.OnWaterfall,
-	// ctx.OnDispose and ctx.Effect - panic with it, because a plugin body calls
-	// them. ctx.Provide, ctx.ProvideChecked and ctx.Serve return it instead: the
-	// owner was already inactive, or the effect registration lost a race with the
-	// fiber going inactive, in which case the binding it just registered is rolled
-	// back. Restart and Update return it too.
+	// ErrInactiveEffect means a registration needs a live fiber or explicit
+	// effect scope, but that lifetime is already inactive. Context.On,
+	// Context.OnOnce, Context.OnValue, Context.OnWaterfall, Context.OnDispose and
+	// Context.Effect panic with it. Context.Provide, Context.ProvideChecked,
+	// Context.Serve, plugin loading, Restart and Update return it instead.
 	ErrInactiveEffect ErrorCode = "INACTIVE_EFFECT"
 	// ErrInvalidPlugin is returned when a value is not a usable plugin.
 	ErrInvalidPlugin ErrorCode = "INVALID_PLUGIN"

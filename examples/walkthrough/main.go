@@ -3,8 +3,8 @@
 // It shows the two rules that make an unload reversible:
 //
 //   - top-level effects unwind newest-first;
-//   - an effect registered while another effect's body runs becomes its child,
-//     and a child unwinds after its owner.
+//   - an effect registered through the context passed to another effect's body
+//     becomes its child, and a child unwinds after its owner.
 package main
 
 import (
@@ -17,12 +17,12 @@ func main() {
 	rootCtx := cordis.New(cordis.WithWriter(os.Stdout), cordis.WithLevel(cordis.LevelDebug))
 
 	plugin := cordis.Define[struct{}]("demo", func(ctx *cordis.Context, _ struct{}) error {
-		// "conn" owns everything registered while its body runs, so the whole
-		// subtree tears down as one unit.
-		ctx.Effect("conn", func() cordis.Disposer {
-			ctx.Logger().Info("conn open")
-			ctx.OnDispose(func() { ctx.Logger().Info("conn close") }) // child of "conn"
-			return func() { ctx.Logger().Info("conn effect down") }
+		// "conn" owns everything registered through its explicit context, so the
+		// whole subtree tears down as one unit.
+		ctx.Effect("conn", func(scope *cordis.Context) cordis.Disposer {
+			scope.Logger().Info("conn open")
+			scope.OnDispose(func() { scope.Logger().Info("conn close") })
+			return func() { scope.Logger().Info("conn effect down") }
 		})
 
 		// Registered after "conn" returned, so it is a sibling, not a child.

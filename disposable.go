@@ -6,7 +6,10 @@ import (
 )
 
 // Disposer releases a resource. Disposers produced by this package are
-// idempotent and safe to call from multiple goroutines.
+// idempotent and safe to call from multiple goroutines. Cleanup functions must
+// not create a cycle of Disposer calls, such as calling their own or an ancestor's
+// Disposer or having two sibling cleanups call each other; like recursive
+// sync.Once.Do use, such cycles deadlock.
 type Disposer func()
 
 // Once wraps fn into a Disposer that runs at most once. A nil fn yields a
@@ -22,8 +25,8 @@ func Once(fn func()) Disposer {
 }
 
 // EffectMeta describes a live effect for diagnostics, mirroring Cordis's
-// Fiber#getEffects(). Nested effects registered while this one's body ran are
-// exposed through Children.
+// Fiber#getEffects(). Effects registered through the Context passed to this
+// effect's body are exposed through Children.
 type EffectMeta struct {
 	Label string
 
@@ -65,61 +68,39 @@ func (m *EffectMeta) removeChild(child *EffectMeta) {
 type effectEntry struct {
 	meta *EffectMeta
 
-	mu       sync.Mutex
-	dispose  Disposer
-	deferred bool
-	done     bool
+	mu          sync.Mutex
+	dispose     Disposer
+	deferred    bool
+	done        bool
+	releaseOnce sync.Once
 	// running marks the entry whose body is executing right now. Only a running
 	// entry may adopt nested effects: nesting under a finished one would leave
 	// the child where no unload can reach it.
 	running bool
-	// parent is the enclosing effect, nil for a fiber-level one. It is written
-	// and read under the owning fiber's lock, before the entry becomes visible,
-	// so it needs no lock of its own.
-	parent *effectEntry
-	// children are effects registered while this effect's body ran. Their
-	// lifetime belongs to this effect, mirroring Cordis, where a nested effect
-	// is collected by its owner instead of the fiber's flat list.
+	// children are effects registered through the explicit context passed to
+	// this effect's body. Their lifetime belongs to this effect, mirroring
+	// Cordis's effect collector.
 	children []*effectEntry
 }
 
-// adopt takes ownership of an effect registered while this entry's body runs.
-// It reports false once the entry is finished or already unwound, which tells
-// the caller to register the effect at the fiber level instead: nesting it
-// under an entry that can no longer reach it would orphan its disposer.
+// adopt takes ownership of an effect registered through this entry's explicit
+// context while its body runs. It reports false once that scope is inactive.
 func (e *effectEntry) adopt(child *effectEntry) bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.done || !e.running {
 		return false
 	}
-	child.parent = e
 	e.children = append(e.children, child)
 	e.meta.addChild(child.meta)
 	return true
 }
 
-// finishBody marks this entry's body as returned, so it can no longer adopt
-// effects.
+// finishBody marks this entry's explicit scope inactive.
 func (e *effectEntry) finishBody() {
 	e.mu.Lock()
 	e.running = false
 	e.mu.Unlock()
-}
-
-// runningAncestor returns the nearest enclosing effect whose body is still
-// running, or nil when none is. It is nil-safe, so a fiber-level effect asks
-// its absent parent for the scope to restore and gets nil.
-func (e *effectEntry) runningAncestor() *effectEntry {
-	for cur := e; cur != nil; cur = cur.parent {
-		cur.mu.Lock()
-		running := cur.running
-		cur.mu.Unlock()
-		if running {
-			return cur
-		}
-	}
-	return nil
 }
 
 // detach releases a nested effect that was disposed individually.
@@ -135,18 +116,27 @@ func (e *effectEntry) detach(child *effectEntry) {
 	e.meta.removeChild(child.meta)
 }
 
-// take claims the entry exactly once and returns its disposer together with
-// the nested effects to unwind afterwards. While the effect body is still
-// running (no disposer installed yet) it records a deferred request and returns
-// nothing; setDispose then reports that the caller must run it.
-func (e *effectEntry) take() (Disposer, []*effectEntry) {
+// requestDispose reports whether the disposer is installed. A request that
+// arrives while the effect body runs is deferred until setDispose installs it.
+func (e *effectEntry) requestDispose() bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.dispose == nil {
+		if !e.done {
+			e.deferred = true
+		}
+		return false
+	}
+	return true
+}
+
+// claimDispose marks the entry claimed by releaseOnce and extracts its disposer
+// and children. The shared once blocks every concurrent handle until both have
+// finished unwinding.
+func (e *effectEntry) claimDispose() (Disposer, []*effectEntry) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.done {
-		return nil, nil
-	}
-	if e.dispose == nil {
-		e.deferred = true
 		return nil, nil
 	}
 	e.done = true
@@ -155,8 +145,8 @@ func (e *effectEntry) take() (Disposer, []*effectEntry) {
 	return e.dispose, children
 }
 
-// setDispose installs the body's disposer and reports whether the entry was
-// already unwound while the body ran, meaning the caller must run it now.
+// setDispose installs the body's disposer and reports whether disposal was
+// requested while the body ran, meaning the caller must run it now.
 func (e *effectEntry) setDispose(dispose Disposer) bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()

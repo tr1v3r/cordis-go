@@ -701,8 +701,8 @@ func decodeConfig[C any](raw map[string]any) (C, error) {
 // Load instantiates every enabled entry of the tree in ctx.
 //
 // Group entries create a child context scope rather than a plugin, and disabled
-// entries are skipped. The returned fibers are owned by ctx and are disposed
-// with it.
+// entries are skipped. The returned fibers follow ctx's explicit effect
+// ownership and are disposed with it.
 func (t *Tree) Load(ctx *cordis.Context, registry *Registry) ([]*cordis.Fiber, error) {
 	if ctx == nil {
 		return nil, fmt.Errorf("loader: nil context")
