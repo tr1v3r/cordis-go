@@ -84,9 +84,11 @@ type Fiber struct {
 	current          *effectEntry
 
 	done                 chan struct{}
+	disposedDone         chan struct{}
 	lifecycleCtx         context.Context
 	cancel               context.CancelFunc
 	parentEffectDisposer Disposer
+	disposeOnce          sync.Once
 }
 
 // StatusEvent is emitted as "internal/status" whenever a fiber changes state.
@@ -118,6 +120,7 @@ func newRootFiber(ctx *Context) *Fiber {
 		resolvedServices: map[string]*serviceBinding{},
 		effects:          newDisposableList(),
 		done:             make(chan struct{}),
+		disposedDone:     make(chan struct{}),
 		lifecycleCtx:     lifecycleCtx,
 		cancel:           cancel,
 	}
@@ -136,6 +139,7 @@ func newFiber(parentCtx *Context, runtime *runtime, cfg any,
 		effects:      newDisposableList(),
 		cleaned:      true,
 		done:         make(chan struct{}),
+		disposedDone: make(chan struct{}),
 		lifecycleCtx: lifecycleCtx,
 		cancel:       cancel,
 	}
@@ -173,6 +177,11 @@ func (f *Fiber) State() FiberState {
 	defer f.mu.Unlock()
 	return f.state
 }
+
+// Disposed returns a channel closed once the fiber reaches StateDisposed.
+// Dispose may return before that when a refresh transition is already running;
+// use this channel to wait for the deferred teardown.
+func (f *Fiber) Disposed() <-chan struct{} { return f.disposedDone }
 
 // Error returns the error that failed the last load, if any.
 func (f *Fiber) Error() error {
@@ -556,15 +565,18 @@ func (f *Fiber) unload() {
 // finalizeDispose drives a disposed fiber to its terminal state and releases
 // the slot it occupied in the parent's effect list. It is idempotent.
 func (f *Fiber) finalizeDispose() {
-	f.setState(StateDisposed)
+	f.disposeOnce.Do(func() {
+		f.setState(StateDisposed)
 
-	f.mu.Lock()
-	parentEffectDisposer := f.parentEffectDisposer
-	f.parentEffectDisposer = nil
-	f.mu.Unlock()
-	if parentEffectDisposer != nil {
-		parentEffectDisposer()
-	}
+		f.mu.Lock()
+		parentEffectDisposer := f.parentEffectDisposer
+		f.parentEffectDisposer = nil
+		f.mu.Unlock()
+		if parentEffectDisposer != nil {
+			parentEffectDisposer()
+		}
+		close(f.disposedDone)
+	})
 }
 
 func (f *Fiber) setState(state FiberState) bool {
@@ -598,7 +610,8 @@ func (f *Fiber) notifyProvided() {
 
 // Dispose starts unloading the plugin and releases everything it registered.
 // It is idempotent. Cancellation happens immediately; when a refresh transition
-// is already running, the effect teardown is deferred to that loop.
+// is already running, the effect teardown is deferred to that loop. Use Disposed
+// to wait for the deferred teardown.
 func (f *Fiber) Dispose() {
 	f.mu.Lock()
 	if f.disposed {
