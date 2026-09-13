@@ -97,9 +97,26 @@ func setService(c *Context, name string, service any) error {
 	if binding.provider != c.fiber {
 		return newError(ErrServiceOwnership, "cannot set service %q from another fiber", name)
 	}
-	binding.setService(service)
-	c.shared.notify(name, scopeLabel)
-	return nil
+	if c.shared.updateService(binding, service) {
+		c.shared.notify(name, scopeLabel)
+		return nil
+	}
+	return newError(ErrServiceMissing,
+		"cannot set service %q: the provider changed while updating", name)
+}
+
+// updateService replaces the value of binding only while it is still the
+// registered binding for its scope. It reports false when another provider
+// replaced the binding between lookup and update.
+func (c *core) updateService(binding *serviceBinding, service any) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	current := c.serviceBindings[binding.scopeLabel]
+	if current == binding {
+		binding.setService(service)
+		return true
+	}
+	return false
 }
 
 func (c *core) registerService(binding *serviceBinding) error {
