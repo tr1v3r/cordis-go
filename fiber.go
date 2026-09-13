@@ -109,7 +109,9 @@ type Fiber struct {
 	live bool
 
 	// current is the effect whose body is running; registrations inside it
-	// become its children.
+	// become its children. It is always nil or an entry whose body is still
+	// running, so a registration can never nest under an effect that is already
+	// finished or unwound.
 	current *effectEntry
 
 	// parentEffectDisposer releases this fiber's slot in the parent's tree.
@@ -294,6 +296,13 @@ func (f *Fiber) effect(label string, body func() Disposer) Disposer {
 // The entry is published before the body runs. If the body disposes the fiber,
 // or another goroutine unloads it while the body runs, the teardown is deferred
 // to this function instead of being lost.
+//
+// Nesting is decided per registration and never on stale state: the entry
+// adopts a nested effect only while its own body runs, a registration that
+// finds a finished enclosing effect becomes a fiber-level one instead, and the
+// scope is restored to the nearest body that is still running (or to the fiber
+// level). Concurrent registrations therefore cannot attach an effect to an
+// entry that will never unwind it.
 func (f *Fiber) tryEffect(label string, body func() Disposer) (Disposer, error) {
 	f.mu.Lock()
 	if f.disposed || f.state == StateUnloading {
@@ -301,23 +310,30 @@ func (f *Fiber) tryEffect(label string, body func() Disposer) (Disposer, error) 
 		return nil, newError(ErrInactiveEffect,
 			"cannot create effect on inactive context %q", f.Name())
 	}
-	entry := &effectEntry{meta: &EffectMeta{Label: label}}
+	entry := &effectEntry{meta: &EffectMeta{Label: label}, running: true}
 	parentEffect := f.current
 	var remove func() bool
-	if parentEffect != nil {
-		// A nested effect is owned by the enclosing one, exactly like Cordis's
-		// effect collector: disposing the outer effect disposes its children.
-		parentEffect.addChild(entry)
-	} else {
+	if parentEffect != nil && !parentEffect.adopt(entry) {
+		// The enclosing effect finished (or was unwound) meanwhile; owning the
+		// entry there would leave its disposer unreachable.
+		parentEffect = nil
+	}
+	if parentEffect == nil {
 		_, remove = f.disposables.add(entry)
 	}
 	f.current = entry
 	f.mu.Unlock()
 
 	dispose, panicked := runEffectBody(body)
+	entry.finishBody()
 
 	f.mu.Lock()
-	f.current = parentEffect
+	if f.current == entry {
+		// Restore the enclosing scope. A registration from another goroutine may
+		// be current by now: leave it alone rather than clobbering it with this
+		// call's captured parent.
+		f.current = parentEffect.runningAncestor()
+	}
 	f.mu.Unlock()
 
 	if panicked != nil {
@@ -326,7 +342,9 @@ func (f *Fiber) tryEffect(label string, body func() Disposer) (Disposer, error) 
 		} else {
 			remove()
 		}
-		entry.abandon()
+		// The body panicked before producing a disposer, but the effects it
+		// registered before that still have to unwind.
+		f.unwindChildren(entry.abandon())
 		panic(panicked)
 	}
 	if dispose == nil {
@@ -362,6 +380,11 @@ func (f *Fiber) runDisposer(entry *effectEntry) {
 		f.callDisposer(entry, dispose)
 	}
 	// Nested effects unwind after their owner, newest first.
+	f.unwindChildren(children)
+}
+
+// unwindChildren disposes nested effects newest-first, after their owner.
+func (f *Fiber) unwindChildren(children []*effectEntry) {
 	for i := range slices.Backward(children) {
 		f.runDisposer(children[i])
 	}
