@@ -235,6 +235,50 @@ func TestComposePatchesNestedEntryByID(t *testing.T) {
 	}
 }
 
+// TestComposeOwnsTheConfigItStores pins the copy Compose makes. The composed
+// tree must not alias the patch it was built from: the same Patch can feed
+// several trees, and mutating one of them - or the patch - must not reach the
+// others through a shared nested map or slice.
+func TestComposeOwnsTheConfigItStores(t *testing.T) {
+	nested := map[string]any{"path": "base.db"}
+	list := []any{"a", map[string]any{"path": "nested.db"}}
+	patch := &loader.Patch{
+		ID: "db", Name: strptr("db"),
+		Config: map[string]any{"nested": nested, "list": list},
+	}
+	layer := loader.Layer{Label: "base", Entries: []*loader.Patch{patch}}
+
+	tree, err := loader.Compose([]loader.Layer{layer})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := loader.Compose([]loader.Layer{layer})
+	if err != nil {
+		t.Fatal(err)
+	}
+	node := tree.Find("db")
+	if node == nil {
+		t.Fatal("want the db entry, got nil")
+	}
+
+	nested["path"] = "changed-in-patch"
+	list[1].(map[string]any)["path"] = "changed-in-patch"
+	if got := node.Config["nested"].(map[string]any)["path"]; got != "base.db" {
+		t.Fatalf("want nested config base.db, got %v", got)
+	}
+	if got := node.Config["list"].([]any)[1].(map[string]any)["path"]; got != "nested.db" {
+		t.Fatalf("want list config nested.db, got %v", got)
+	}
+
+	node.Config["nested"].(map[string]any)["path"] = "changed-in-tree"
+	if got := nested["path"]; got != "changed-in-patch" {
+		t.Fatalf("want the patch unchanged at changed-in-patch, got %v", got)
+	}
+	if got := second.Find("db").Config["nested"].(map[string]any)["path"]; got != "base.db" {
+		t.Fatalf("want the second tree at base.db, got %v", got)
+	}
+}
+
 func TestTreeLoadRollsBackOnError(t *testing.T) {
 	registry := loader.NewRegistry()
 	var events []string
