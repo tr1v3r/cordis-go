@@ -59,7 +59,8 @@ ctx.OnDispose(func() { order = append(order, "second") })
 ```
 
 `ctx.Context()` 返回一个随 fiber 一起取消的 `context.Context`，交给插件启动的 goroutine，
-这样 goroutine 的存活期和插件一致。
+它的寿命覆盖 fiber 实例的整个生命周期。注意：依赖变化导致的 unload/reload 不会取消它；
+如果某次 load 启动的 goroutine 必须随该次 load 结束，请在 `ctx.OnDispose` 里注册取消。
 
 根 fiber 的 `context.Context` 默认派生自 `context.Background()`，整棵树的寿命由调用方掌握
 （`root.Fiber().Dispose()`）。要让宿主的信号/取消来接管，用 `cordis.WithBaseContext`：
@@ -95,6 +96,14 @@ pending ──依赖就绪──> loading ──成功──> active
 
 `failed` 不是终态：`fiber.Update(cfg)` 或依赖重新就绪都会再跑一次。失败时
 `Load` 已经用 `err` 报过一次，`fiber.Error()` 保存同一个错误，直到下次加载成功才清空。
+
+`fiber.Dispose()` 会立即取消 `ctx.Context()`；如果调用时已有 refresh transition 在跑，
+effect 回收会延后到该循环。此时可以等待 `fiber.Disposed()`，它在 fiber 进入 `disposed`
+状态后关闭。
+
+注意：`Disposed()` 只覆盖当前 fiber 进入终态；如果 teardown 开始时还有正在初始化的
+effect body，或还有忙的子 fiber，它们的清理可能晚于 `Disposed()` 关闭。它不是整棵子树
+资源回收完成的屏障。
 
 ### 3. Effect — 可逆副作用
 

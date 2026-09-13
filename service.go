@@ -1,6 +1,9 @@
 package cordis
 
-import "fmt"
+import (
+	"fmt"
+	"sync"
+)
 
 // serviceBinding associates a service name and scope with its provider and
 // concrete service object.
@@ -10,6 +13,22 @@ type serviceBinding struct {
 	provider          *Fiber
 	service           any
 	availabilityCheck func() bool
+
+	mu sync.RWMutex
+}
+
+// getService returns the current service value.
+func (b *serviceBinding) getService() any {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.service
+}
+
+// setService replaces the current service value.
+func (b *serviceBinding) setService(service any) {
+	b.mu.Lock()
+	b.service = service
+	b.mu.Unlock()
 }
 
 func provide(c *Context, name string, service any,
@@ -78,11 +97,26 @@ func setService(c *Context, name string, service any) error {
 	if binding.provider != c.fiber {
 		return newError(ErrServiceOwnership, "cannot set service %q from another fiber", name)
 	}
-	c.shared.mu.Lock()
-	binding.service = service
-	c.shared.mu.Unlock()
-	c.shared.notify(name, scopeLabel)
-	return nil
+	if c.shared.updateService(binding, service) {
+		c.shared.notify(name, scopeLabel)
+		return nil
+	}
+	return newError(ErrServiceMissing,
+		"cannot set service %q: the provider changed while updating", name)
+}
+
+// updateService replaces the value of binding only while it is still the
+// registered binding for its scope. It reports false when another provider
+// replaced the binding between lookup and update.
+func (c *core) updateService(binding *serviceBinding, service any) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	current := c.serviceBindings[binding.scopeLabel]
+	if current == binding {
+		binding.setService(service)
+		return true
+	}
+	return false
 }
 
 func (c *core) registerService(binding *serviceBinding) error {
@@ -130,8 +164,13 @@ func (c *core) lookupService(scopeLabel string) *serviceBinding {
 	return binding
 }
 
-func (binding *serviceBinding) available() bool {
-	return binding.availabilityCheck == nil || runCheck(binding.availabilityCheck)
+func (b *serviceBinding) available() bool {
+	return b.availabilityCheck == nil || runCheck(b.availabilityCheck)
+}
+
+// live reports whether the binding still resolves to an active provider.
+func (b *serviceBinding) live() bool {
+	return b.provider != nil && b.provider.State() == StateActive && b.available()
 }
 
 func runCheck(check func() bool) (ok bool) {
