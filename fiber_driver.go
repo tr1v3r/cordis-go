@@ -15,11 +15,23 @@ func (f *Fiber) refresh() {
 // drive drains transition passes until no caller asked for another one.
 func (f *Fiber) drive() {
 	for {
-		f.beginPass()
+		// Begin a pass: clear the rerun marker for this transition.
+		f.mu.Lock()
+		f.dirty = false
+		f.mu.Unlock()
+
 		f.sync()
-		if f.endPass() {
+
+		// End a pass: keep ownership when another request arrived while sync
+		// was running; otherwise release it and stop.
+		f.mu.Lock()
+		dirty := f.dirty
+		if dirty {
+			f.mu.Unlock()
 			continue
 		}
+		f.busy = false
+		f.mu.Unlock()
 		return
 	}
 }
@@ -35,25 +47,6 @@ func (f *Fiber) beginTransition() bool {
 	}
 	f.busy = true
 	return true
-}
-
-// beginPass clears the rerun marker for one transition pass.
-func (f *Fiber) beginPass() {
-	f.mu.Lock()
-	f.dirty = false
-	f.mu.Unlock()
-}
-
-// endPass releases ownership unless another pass was requested. It reports
-// whether the owner loop must continue.
-func (f *Fiber) endPass() bool {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.dirty {
-		return true
-	}
-	f.busy = false
-	return false
 }
 
 // claimDispose marks the fiber disposed. It reports whether a transition owner
