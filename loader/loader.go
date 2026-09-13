@@ -160,6 +160,9 @@ func Compose(layers []Layer, opts ...ComposeOption) (*Tree, error) {
 	}
 
 	for _, layer := range layers {
+		if err := validateLayer(layer); err != nil {
+			return nil, err
+		}
 		composer.tree.Layers = append(composer.tree.Layers, layer.Label)
 		for _, entry := range layer.Entries {
 			var err error
@@ -173,7 +176,112 @@ func Compose(layers []Layer, opts ...ComposeOption) (*Tree, error) {
 			}
 		}
 	}
+	// A non-group entry's children are never loaded, but they still take part in
+	// the composed tree: they are counted, dumped and indexed. Say so after the
+	// whole tree exists, because a later layer may turn the entry into a group.
+	if err := composer.checkNonGroupChildren(); err != nil {
+		return nil, err
+	}
 	return composer.tree, nil
+}
+
+// checkNonGroupChildren reports every entry that carries children without being
+// a group: Load only recurses into groups, so such children are dropped without
+// a trace unless Compose speaks up.
+func (c *treeComposer) checkNonGroupChildren() error {
+	var walk func(nodes []*Node) error
+	walk = func(nodes []*Node) error {
+		for _, node := range nodes {
+			if node == nil {
+				continue
+			}
+			if len(node.Children) > 0 && !node.Group {
+				message := fmt.Sprintf(
+					"entry %q has plugins but is not a group: they will not be loaded",
+					nodeLabel(node))
+				if c.options.strict {
+					return fmt.Errorf("layer %s: %s", node.Source, message)
+				}
+				c.tree.Warnings = append(c.tree.Warnings, message)
+			}
+			if err := walk(node.Children); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	return walk(c.tree.Nodes)
+}
+
+// nodeLabel names a node in a diagnostic: its id, else its name, else a
+// placeholder, because an entry may carry neither.
+func nodeLabel(node *Node) string {
+	if node.ID != "" {
+		return node.ID
+	}
+	if node.Name != "" {
+		return node.Name
+	}
+	return "<unnamed>"
+}
+
+// validateLayer rejects entries that carry "insert" together with fields of a
+// normal entry, in whatever layer and at whatever depth they appear.
+//
+// Neither applyBase nor applyPatch can honour both halves of such an entry: the
+// base path drops the outer entry, the patch path drops everything but the
+// insert - including the "patch id matched no entry" warning the author would
+// need to notice it. Failing loudly is the only way to keep half a config from
+// disappearing.
+func validateLayer(layer Layer) error {
+	for _, entry := range layer.Entries {
+		if err := validateEntry(layer.Label, entry); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateEntry(source string, entry *Patch) error {
+	if entry == nil {
+		return nil
+	}
+	if len(entry.Insert) > 0 && declaresEntryFields(entry) {
+		return fmt.Errorf(
+			"layer %s: entry %q declares both insert and other fields; split it into two entries",
+			source, entryLabel(entry))
+	}
+	for _, child := range entry.Plugins {
+		if err := validateEntry(source, child); err != nil {
+			return err
+		}
+	}
+	for _, inserted := range entry.Insert {
+		if err := validateEntry(source, inserted); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// declaresEntryFields reports whether an entry carries anything that only makes
+// sense without "insert".
+func declaresEntryFields(entry *Patch) bool {
+	return entry.ID != "" || entry.Name != nil || entry.Label != nil ||
+		entry.Disabled != nil || entry.Group != nil || entry.Inject != nil ||
+		entry.Config != nil || len(entry.Plugins) > 0
+}
+
+// entryLabel names an entry in a diagnostic: its id, else its name, else a
+// placeholder, because a malformed entry may carry neither.
+func entryLabel(entry *Patch) string {
+	if entry.ID != "" {
+		return entry.ID
+	}
+	if entry.Name != nil && *entry.Name != "" {
+		return *entry.Name
+	}
+	return "<unnamed>"
 }
 
 // applyBase creates entries for a base layer.
@@ -520,14 +628,24 @@ func (t *Tree) loadNodes(ctx *cordis.Context, registry *Registry, nodes []*Node,
 		if !ok {
 			return fmt.Errorf("loader: entry %q references unknown plugin %q", node.ID, node.Name)
 		}
+		if len(node.Children) > 0 {
+			// Only a group recurses into its children, so loading this entry
+			// would silently drop them: refuse instead of half-loading the tree.
+			return fmt.Errorf("loader: entry %q (%s): plugins require group: true",
+				node.ID, node.Name)
+		}
 		fiber, err := registeredPlugin.load(ctx, node.Config, deps)
 		if err != nil {
+			// A failed entry still owns a fiber: it holds a slot in the parent's
+			// effect tree and a runtime in the registry. Rollback below only
+			// walks the entries that loaded, so dispose this one here - a load
+			// error always comes with the fiber that reported it.
+			if fiber != nil {
+				fiber.Dispose()
+			}
+			// A failing entry is a configuration error: surface it so the caller
+			// sees all-or-nothing instead of a half-loaded tree.
 			return fmt.Errorf("loader: entry %q (%s): %w", node.ID, node.Name, err)
-		}
-		if fiber.State() == cordis.StateFailed {
-			// A failed plugin body is a configuration error too: surface it so
-			// the caller sees all-or-nothing instead of a half-loaded tree.
-			return fmt.Errorf("loader: entry %q (%s): %w", node.ID, node.Name, fiber.Error())
 		}
 		*fibers = append(*fibers, fiber)
 	}
