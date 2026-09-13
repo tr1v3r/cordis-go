@@ -369,12 +369,9 @@ const (
 	// is satisfiable and differs from the recorded one.
 	actionLoad
 
-	// actionCycle replaces a live generation. The fiber is not clean, so the
-	// previous effects unwind before the new generation loads.
-	actionCycle
-
-	// actionReload forces an unload/reload cycle for Restart and Update,
-	// regardless of whether the dependency epoch changed.
+	// actionReload forces an unload/reload cycle for Restart, Update, or a
+	// live generation whose provider epoch changed. The target dependencies
+	// are resolved after the old generation is unloaded.
 	actionReload
 
 	// actionDispose drives a terminal disposal: unload effects and finalize
@@ -394,8 +391,6 @@ func (f *Fiber) sync() {
 		f.unload()
 	case actionLoad:
 		f.applyLoad(bindings, epoch)
-	case actionCycle:
-		f.applyCycle(bindings, epoch)
 	case actionReload:
 		f.reload()
 	}
@@ -431,7 +426,7 @@ func (f *Fiber) plan() (action fiberAction, bindings map[string]*serviceBinding,
 		return actionUnload, nil, ""
 	}
 	if hasEffects {
-		return actionCycle, bindings, epoch
+		return actionReload, nil, ""
 	}
 	return actionLoad, bindings, epoch
 }
@@ -460,30 +455,6 @@ func (f *Fiber) applyLoad(bindings map[string]*serviceBinding, epoch string) {
 	}
 	f.epoch = epoch
 	f.mu.Unlock()
-	f.load(bindings)
-}
-
-// applyCycle unloads the previous generation, commits the planned epoch, and
-// loads the new generation.
-func (f *Fiber) applyCycle(bindings map[string]*serviceBinding, epoch string) {
-	f.mu.Lock()
-	if f.disposed {
-		f.mu.Unlock()
-		f.unload()
-		return
-	}
-	f.epoch = epoch
-	f.mu.Unlock()
-
-	f.unload()
-
-	f.mu.Lock()
-	disposed := f.disposed
-	f.mu.Unlock()
-	if disposed {
-		f.unload()
-		return
-	}
 	f.load(bindings)
 }
 

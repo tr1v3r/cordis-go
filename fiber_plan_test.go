@@ -64,10 +64,10 @@ func TestPlanSelectsTransition(t *testing.T) {
 			want:   actionLoad,
 		},
 		{
-			name:   "dirty cycle",
+			name:   "dirty reload",
 			plugin: planTestPlugin("cycle"),
 			setup:  func(f *Fiber) { setPlanTestState(f, "old", true, false, false) },
-			want:   actionCycle,
+			want:   actionReload,
 		},
 	}
 
