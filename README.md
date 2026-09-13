@@ -101,6 +101,10 @@ pending ──依赖就绪──> loading ──成功──> active
 effect 回收会延后到该循环。此时可以等待 `fiber.Disposed()`，它在 fiber 进入 `disposed`
 状态后关闭。
 
+注意：`Disposed()` 只覆盖当前 fiber 进入终态；如果 teardown 开始时还有正在初始化的
+effect body，或还有忙的子 fiber，它们的清理可能晚于 `Disposed()` 关闭。它不是整棵子树
+资源回收完成的屏障。
+
 ### 3. Effect — 可逆副作用
 
 Cordis 的一切副作用都通过 `ctx` 注册，因此卸载时可以精确回收。Go 版额外提供了
