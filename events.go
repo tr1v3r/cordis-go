@@ -191,9 +191,9 @@ func (b *eventBus) invoke(listener *eventListener, payload any) (result any, err
 
 func (b *eventBus) emitInternal(name string, payload any) {
 	for _, listener := range b.snapshot(name) {
-		if _, err := b.invoke(listener, payload); err != nil {
-			b.shared.log.errorf("cordis: %v", err)
-		}
+		// invoke reports a listener panic itself; logging the returned error
+		// here too would report the same panic twice.
+		_, _ = b.invoke(listener, payload)
 	}
 }
 
@@ -220,9 +220,9 @@ func (c *Context) EmitScoped[E any](scopeName, name string, payload E) {
 
 func emitWith[E any](c *Context, name string, payload E, filter func(*eventListener) bool) {
 	for _, listener := range c.shared.bus.selectListeners(name, filter) {
-		if _, err := c.shared.bus.invoke(listener, payload); err != nil {
-			c.shared.log.errorf("cordis: %v", err)
-		}
+		// invoke reports a listener panic itself; logging the returned error
+		// here too would report the same panic twice.
+		_, _ = c.shared.bus.invoke(listener, payload)
 	}
 }
 
@@ -242,7 +242,7 @@ func bailWith[E any](c *Context, name string, payload E,
 	for _, listener := range c.shared.bus.selectListeners(name, filter) {
 		value, err := c.shared.bus.invoke(listener, payload)
 		if err != nil {
-			c.shared.log.errorf("cordis: %v", err)
+			// invoke already reported the panic; keep dispatching.
 			continue
 		}
 		if value != nil && value != false {
