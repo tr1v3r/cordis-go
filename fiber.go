@@ -441,8 +441,7 @@ func (f *Fiber) applyUnload() {
 	f.mu.Lock()
 	if f.disposed {
 		f.mu.Unlock()
-		// The first unload may have raced with Dispose; finalize is idempotent.
-		f.finalizeDispose()
+		f.unload()
 		return
 	}
 	f.epoch = epochInactive
@@ -496,7 +495,8 @@ func (f *Fiber) reload() {
 	f.mu.Lock()
 	if f.disposed {
 		f.mu.Unlock()
-		f.unload()
+		// The first unload may have raced with Dispose; finalize is idempotent.
+		f.finalizeDispose()
 		return
 	}
 	f.epoch = epochInactive
