@@ -1,6 +1,7 @@
 package cordis_test
 
 import (
+	"sync/atomic"
 	"testing"
 
 	"github.com/tr1v3r/cordis-go"
@@ -41,5 +42,45 @@ func TestLookupPinnedBindingSurvivesProviderUnload(t *testing.T) {
 	}
 	if got, ok := consumerFiber.Ctx.Lookup("db"); ok || got != nil {
 		t.Fatalf("want the settled fiber to lose the binding, got %v ok=%v", got, ok)
+	}
+}
+
+// TestPinnedBindingStillHonorsAvailabilityCheck pins the other half of the
+// documented snapshot contract: the pinned path ignores provider activity but
+// still re-checks the availability predicate, so a pinned binding hides while
+// its check fails and reappears once the check passes.
+func TestPinnedBindingStillHonorsAvailabilityCheck(t *testing.T) {
+	root := cordis.New()
+	var ready atomic.Bool
+	ready.Store(true)
+	provider := cordis.Define[struct{}]("provider", func(ctx *cordis.Context, _ struct{}) error {
+		_, err := cordis.ProvideChecked[*fakeDB](ctx, "db", &fakeDB{name: "checked"},
+			ready.Load)
+		return err
+	})
+	if _, err := cordis.Load(root, provider, struct{}{}); err != nil {
+		t.Fatal(err)
+	}
+
+	var okWhileDown, okWhileUp bool
+	consumer := cordis.Define[struct{}]("consumer", func(ctx *cordis.Context, _ struct{}) error {
+		// The provider stays active the whole time, so both reads resolve
+		// through the snapshot the injection pinned; the predicate must be
+		// what decides them.
+		ready.Store(false)
+		_, okWhileDown = cordis.Get[*fakeDB](ctx, "db")
+		ready.Store(true)
+		_, okWhileUp = cordis.Get[*fakeDB](ctx, "db")
+		return nil
+	}).WithInject("db")
+
+	if _, err := cordis.Load(root, consumer, struct{}{}); err != nil {
+		t.Fatal(err)
+	}
+	if okWhileDown {
+		t.Fatal("want a failing availability check to hide even a pinned binding")
+	}
+	if !okWhileUp {
+		t.Fatal("want the pinned binding to resolve once the check passes")
 	}
 }
