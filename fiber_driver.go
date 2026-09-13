@@ -48,14 +48,3 @@ func (f *Fiber) beginTransition() bool {
 	f.busy = true
 	return true
 }
-
-// takeRequest consumes pending transition requests under the fiber lock. It
-// reports whether the fiber is disposed and whether a forced reload is pending.
-func (f *Fiber) takeRequest() (disposed, forceReload bool) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	disposed = f.disposed
-	forceReload = f.forceReload
-	f.forceReload = false
-	return
-}

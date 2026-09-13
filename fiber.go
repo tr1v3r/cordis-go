@@ -359,7 +359,12 @@ func (f *Fiber) sync() {
 		return
 	}
 
-	disposed, forceReload := f.takeRequest()
+	// Consume terminal and forced-reload requests before reading dependencies.
+	f.mu.Lock()
+	disposed := f.disposed
+	forceReload := f.forceReload
+	f.forceReload = false
+	f.mu.Unlock()
 	if disposed {
 		f.unload()
 		return
