@@ -330,3 +330,111 @@ func TestPatchInsertRejectsDuplicateID(t *testing.T) {
 		t.Fatal("strict composition must reject a duplicate id")
 	}
 }
+
+type numbersConfig struct {
+	Count  int64            `json:"count"`
+	List   []int64          `json:"list"`
+	Limits map[string]int64 `json:"limits"`
+}
+
+// TestLoadKeepsLargeJSONIntegers pins the layer parse path against float64: a
+// JSON integer beyond 2^53 must reach the plugin config exactly as written,
+// and the dump must print that value instead of the rounded one.
+func TestLoadKeepsLargeJSONIntegers(t *testing.T) {
+	const want = int64(9007199254740993)
+	layer, err := loader.ParseLayer("file", []byte(`[
+	  {"id": "big", "name": "numbers", "config": {
+	    "count": 9007199254740993,
+	    "list": [9007199254740993],
+	    "limits": {"max": 9007199254740993}
+	  }}
+	]`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tree, err := loader.Compose([]loader.Layer{layer})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var got numbersConfig
+	registry := loader.NewRegistry()
+	loader.MustRegister(registry, "numbers",
+		cordis.Define[numbersConfig]("numbers", func(_ *cordis.Context, cfg numbersConfig) error {
+			got = cfg
+			return nil
+		}))
+	if _, err := tree.Load(cordis.New(), registry); err != nil {
+		t.Fatal(err)
+	}
+	if got.Count != want {
+		t.Fatalf("want count %d, got %d", want, got.Count)
+	}
+	if len(got.List) != 1 || got.List[0] != want {
+		t.Fatalf("want list [%d], got %v", want, got.List)
+	}
+	if got.Limits["max"] != want {
+		t.Fatalf("want max %d, got %d", want, got.Limits["max"])
+	}
+
+	dump := tree.DumpString()
+	if !strings.Contains(dump, "9007199254740993") {
+		t.Fatalf("want the dump to keep 9007199254740993, got:\n%s", dump)
+	}
+	if strings.Contains(dump, "9007199254740992") {
+		t.Fatalf("want no float64-rounded value in the dump, got:\n%s", dump)
+	}
+}
+
+// TestLoadKeepsOrdinaryJSONScalars guards the number handling from the other
+// side: strings, booleans, floats and null must keep decoding as before.
+func TestLoadKeepsOrdinaryJSONScalars(t *testing.T) {
+	type scalarsConfig struct {
+		Label   string  `json:"label"`
+		Enabled bool    `json:"enabled"`
+		Ratio   float64 `json:"ratio"`
+		Missing *string `json:"missing"`
+	}
+	layer, err := loader.ParseLayer("file", []byte(`[
+	  {"id": "s", "name": "scalars", "config": {
+	    "label": "db", "enabled": true, "ratio": 1.5, "missing": null
+	  }}
+	]`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tree, err := loader.Compose([]loader.Layer{layer})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var got scalarsConfig
+	registry := loader.NewRegistry()
+	loader.MustRegister(registry, "scalars",
+		cordis.Define[scalarsConfig]("scalars", func(_ *cordis.Context, cfg scalarsConfig) error {
+			got = cfg
+			return nil
+		}))
+	if _, err := tree.Load(cordis.New(), registry); err != nil {
+		t.Fatal(err)
+	}
+	if got.Label != "db" || !got.Enabled || got.Ratio != 1.5 || got.Missing != nil {
+		t.Fatalf("want label db, enabled true, ratio 1.5, missing nil, got %+v", got)
+	}
+}
+
+// TestParseLayerRejectsTrailingData keeps the strictness of the plain
+// json.Unmarshal the number handling replaced: a layer file is exactly one
+// array, and a second value or trailing junk must not be read as a prefix.
+func TestParseLayerRejectsTrailingData(t *testing.T) {
+	for _, data := range []string{"[] []", "[] junk", "[]}"} {
+		if _, err := loader.ParseLayer("file", []byte(data)); err == nil {
+			t.Fatalf("want an error for %q, got none", data)
+		}
+	}
+	for _, data := range []string{"[]", "  []\n"} {
+		if _, err := loader.ParseLayer("file", []byte(data)); err != nil {
+			t.Fatalf("want no error for %q, got %v", data, err)
+		}
+	}
+}
