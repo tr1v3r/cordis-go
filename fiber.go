@@ -65,21 +65,39 @@ type Fiber struct {
 	// Ctx is the fiber's own context, passed to the plugin body.
 	Ctx *Context
 
+	// runtime, inject and root are fixed when the fiber is constructed.
 	runtime *runtime
 	inject  map[string]struct{}
+	root    bool
 
-	mu               sync.Mutex
-	state            FiberState
-	err              error
-	epoch            string
-	resolvedServices map[string]*serviceBinding
-	config           any
-	rawConfig        any
+	// Lifetime plumbing, also fixed at construction. Dispose calls cancel and
+	// closes done; finalizeDispose runs the terminal transition once.
+	lifecycleCtx context.Context
+	cancel       context.CancelFunc
+	done         chan struct{}
+	disposeOnce  sync.Once
 
 	// disposables is the fiber's owned effect tree: each entry pairs a label
 	// with the disposer that releases it, and nested effects become children.
-	// The public Effects() exposes only the metadata, not the disposers.
+	// The pointer is fixed at construction and the list synchronizes itself,
+	// so mu does not guard it. The public Effects() exposes only the metadata,
+	// not the disposers.
 	disposables *disposableList
+
+	// mu guards the mutable fields below.
+	mu sync.Mutex
+
+	// Current generation: lifecycle state, dependency epoch, and what load
+	// derived from that epoch.
+	state            FiberState
+	err              error
+	epoch            string
+	config           any
+	rawConfig        any
+	resolvedServices map[string]*serviceBinding
+
+	// Transition driver: busy marks the owner of a pass, dirty records a rerun
+	// request, and forceReload/disposed are requests consumed by sync.
 	busy        bool
 	dirty       bool
 	forceReload bool
@@ -88,15 +106,14 @@ type Fiber struct {
 	// live marks a generation claimed by load and not yet released by unload.
 	// It is set before the body runs and cleared before disposers run, so it
 	// stays true for an active fiber even when it registered no effects.
-	live    bool
-	root    bool
+	live bool
+
+	// current is the effect whose body is running; registrations inside it
+	// become its children.
 	current *effectEntry
 
-	done                 chan struct{}
-	lifecycleCtx         context.Context
-	cancel               context.CancelFunc
+	// parentEffectDisposer releases this fiber's slot in the parent's tree.
 	parentEffectDisposer Disposer
-	disposeOnce          sync.Once
 }
 
 // StatusEvent is emitted as "internal/status" whenever a fiber changes state.
