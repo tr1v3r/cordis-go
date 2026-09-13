@@ -176,7 +176,53 @@ func Compose(layers []Layer, opts ...ComposeOption) (*Tree, error) {
 			}
 		}
 	}
+	// A non-group entry's children are never loaded, but they still take part in
+	// the composed tree: they are counted, dumped and indexed. Say so after the
+	// whole tree exists, because a later layer may turn the entry into a group.
+	if err := composer.checkNonGroupChildren(); err != nil {
+		return nil, err
+	}
 	return composer.tree, nil
+}
+
+// checkNonGroupChildren reports every entry that carries children without being
+// a group: Load only recurses into groups, so such children are dropped without
+// a trace unless Compose speaks up.
+func (c *treeComposer) checkNonGroupChildren() error {
+	var walk func(nodes []*Node) error
+	walk = func(nodes []*Node) error {
+		for _, node := range nodes {
+			if node == nil {
+				continue
+			}
+			if len(node.Children) > 0 && !node.Group {
+				message := fmt.Sprintf(
+					"entry %q has plugins but is not a group: they will not be loaded",
+					nodeLabel(node))
+				if c.options.strict {
+					return fmt.Errorf("layer %s: %s", node.Source, message)
+				}
+				c.tree.Warnings = append(c.tree.Warnings, message)
+			}
+			if err := walk(node.Children); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	return walk(c.tree.Nodes)
+}
+
+// nodeLabel names a node in a diagnostic: its id, else its name, else a
+// placeholder, because an entry may carry neither.
+func nodeLabel(node *Node) string {
+	if node.ID != "" {
+		return node.ID
+	}
+	if node.Name != "" {
+		return node.Name
+	}
+	return "<unnamed>"
 }
 
 // validateLayer rejects entries that carry "insert" together with fields of a
@@ -564,6 +610,12 @@ func (t *Tree) loadNodes(ctx *cordis.Context, registry *Registry, nodes []*Node,
 		registeredPlugin, ok := registry.get(node.Name)
 		if !ok {
 			return fmt.Errorf("loader: entry %q references unknown plugin %q", node.ID, node.Name)
+		}
+		if len(node.Children) > 0 {
+			// Only a group recurses into its children, so loading this entry
+			// would silently drop them: refuse instead of half-loading the tree.
+			return fmt.Errorf("loader: entry %q (%s): plugins require group: true",
+				node.ID, node.Name)
 		}
 		fiber, err := registeredPlugin.load(ctx, node.Config, deps)
 		if err != nil {
