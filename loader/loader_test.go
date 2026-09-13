@@ -368,3 +368,69 @@ func TestPatchInsertRejectsDuplicateID(t *testing.T) {
 		t.Fatal("strict composition must reject a duplicate id")
 	}
 }
+
+// TestComposeNonGroupChildrenWarnAndStrictFails pins the "why is my config not
+// applied" half of the contract: Load only recurses into groups, so children of
+// a non-group entry never load, and Compose must say so.
+func TestComposeNonGroupChildrenWarnAndStrictFails(t *testing.T) {
+	const want = `entry "parent" has plugins but is not a group: they will not be loaded`
+
+	for _, tc := range []struct {
+		name  string
+		entry *loader.Patch
+	}{
+		{
+			name: "id",
+			entry: &loader.Patch{ID: "parent", Name: strptr("db"),
+				Plugins: []*loader.Patch{{ID: "child", Name: strptr("db")}}},
+		},
+		{
+			name: "name",
+			entry: &loader.Patch{Name: strptr("parent"),
+				Plugins: []*loader.Patch{{ID: "child", Name: strptr("db")}}},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			layers := []loader.Layer{{Label: "base", Entries: []*loader.Patch{tc.entry}}}
+			tree, err := loader.Compose(layers)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(tree.Warnings) != 1 || tree.Warnings[0] != want {
+				t.Fatalf("want exactly one warning %q, got %v", want, tree.Warnings)
+			}
+			_, err = loader.Compose(layers, loader.Strict())
+			if err == nil {
+				t.Fatal("want an error: plugins on a non-group entry are never loaded")
+			}
+			if !strings.Contains(err.Error(), "layer base: "+want) {
+				t.Fatalf("want the strict error to carry the layer and the reason, got %q", err)
+			}
+		})
+	}
+}
+
+// TestTreeLoadRejectsNonGroupChildren pins the loud half: loading a tree whose
+// entry has children without being a group must fail instead of loading the
+// parent and dropping the children.
+func TestTreeLoadRejectsNonGroupChildren(t *testing.T) {
+	registry := loader.NewRegistry()
+	loader.MustRegister(registry, "db",
+		cordis.Define[struct{}]("db", func(*cordis.Context, struct{}) error { return nil }))
+
+	layer := loader.Layer{Label: "base", Entries: []*loader.Patch{{
+		ID: "parent", Name: strptr("db"),
+		Plugins: []*loader.Patch{{ID: "child", Name: strptr("db")}},
+	}}}
+	tree, err := loader.Compose([]loader.Layer{layer})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = tree.Load(cordis.New(), registry)
+	if err == nil {
+		t.Fatal("want an error instead of loading the parent and dropping its children")
+	}
+	if !strings.Contains(err.Error(), "group: true") {
+		t.Fatalf("want the error to point at group: true, got %q", err)
+	}
+}
