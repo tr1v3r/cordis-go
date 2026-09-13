@@ -20,7 +20,7 @@ func (t *Tree) Dump(w io.Writer) error {
 	for _, warning := range t.Warnings {
 		builder.WriteString("# warning: " + warning + "\n")
 	}
-	if len(t.Nodes) == 0 {
+	if t.Size() == 0 {
 		builder.WriteString("# (empty)\n")
 	}
 	for _, node := range t.Nodes {
@@ -38,6 +38,11 @@ func (t *Tree) DumpString() string {
 }
 
 func dumpNode(builder *strings.Builder, node *Node, indent string) {
+	if node == nil {
+		// Load skips nil entries; a hand-built tree may hold them, and the dump
+		// skips them the same way instead of dereferencing them.
+		return
+	}
 	provenance := node.Source
 	if len(node.Patched) > 0 {
 		provenance += "; patched by " + strings.Join(node.Patched, ", ")
@@ -71,12 +76,22 @@ func dumpNode(builder *strings.Builder, node *Node, indent string) {
 	if len(node.Config) > 0 {
 		fmt.Fprintf(builder, "%s  config: %s\n", indent, dumpConfig(node.Config))
 	}
-	if len(node.Children) > 0 {
+	if hasNodes(node.Children) {
 		fmt.Fprintf(builder, "%s  plugins:\n", indent)
 		for _, child := range node.Children {
 			dumpNode(builder, child, indent+"    ")
 		}
 	}
+}
+
+// hasNodes reports whether nodes holds at least one entry to print.
+func hasNodes(nodes []*Node) bool {
+	for _, node := range nodes {
+		if node != nil {
+			return true
+		}
+	}
+	return false
 }
 
 // dumpConfig renders a config map with sorted keys so dumps are stable.
@@ -115,7 +130,10 @@ func dumpValue(value any) string {
 	default:
 		data, err := json.Marshal(typed)
 		if err != nil {
-			return fmt.Sprintf("%v", typed)
+			// Not every value a hand-built config can hold is JSON: a channel, a
+			// func or NaN has no literal. Say so instead of printing a
+			// Go-formatted value that reads like JSON but is not.
+			return fmt.Sprintf("<unencodable %T: %v>", typed, err)
 		}
 		return string(data)
 	}
