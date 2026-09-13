@@ -75,11 +75,15 @@ type Fiber struct {
 	resolvedServices map[string]*serviceBinding
 	config           any
 	rawConfig        any
-	effects          *disposableList
-	busy             bool
-	dirty            bool
-	forceReload      bool
-	disposed         bool
+
+	// disposables is the fiber's owned effect tree: each entry pairs a label
+	// with the disposer that releases it, and nested effects become children.
+	// The public Effects() exposes only the metadata, not the disposers.
+	disposables *disposableList
+	busy        bool
+	dirty       bool
+	forceReload bool
+	disposed    bool
 
 	// live marks a generation claimed by load and not yet released by unload.
 	// It is set before the body runs and cleared before disposers run, so it
@@ -122,7 +126,7 @@ func newRootFiber(ctx *Context) *Fiber {
 		state:            StateActive,
 		root:             true,
 		resolvedServices: map[string]*serviceBinding{},
-		effects:          newDisposableList(),
+		disposables:      newDisposableList(),
 		live:             true,
 		done:             make(chan struct{}),
 		lifecycleCtx:     lifecycleCtx,
@@ -140,7 +144,7 @@ func newFiber(parentCtx *Context, runtime *runtime, cfg any,
 		rawConfig:    cfg,
 		state:        StatePending,
 		epoch:        epochInactive,
-		effects:      newDisposableList(),
+		disposables:  newDisposableList(),
 		done:         make(chan struct{}),
 		lifecycleCtx: lifecycleCtx,
 		cancel:       cancel,
@@ -245,7 +249,7 @@ func (f *Fiber) Store() map[string]any {
 
 // Effects returns the live effect metadata tree of this fiber.
 func (f *Fiber) Effects() []*EffectMeta {
-	entries := f.effects.snapshot()
+	entries := f.disposables.snapshot()
 	out := make([]*EffectMeta, 0, len(entries))
 	for _, entry := range entries {
 		out = append(out, entry.meta)
@@ -288,7 +292,7 @@ func (f *Fiber) tryEffect(label string, body func() Disposer) (Disposer, error) 
 		// effect collector: disposing the outer effect disposes its children.
 		parentEffect.addChild(entry)
 	} else {
-		_, remove = f.effects.add(entry)
+		_, remove = f.disposables.add(entry)
 	}
 	f.current = entry
 	f.mu.Unlock()
@@ -586,7 +590,7 @@ func (f *Fiber) unload() {
 	}
 
 	f.setState(StateUnloading)
-	for _, entry := range f.effects.clear() {
+	for _, entry := range f.disposables.clear() {
 		f.runDisposer(entry)
 	}
 	f.mu.Lock()
