@@ -425,7 +425,7 @@ func (f *Fiber) unwindChildren(children []*effectEntry) {
 func (f *Fiber) callDisposer(entry *effectEntry, dispose Disposer) {
 	defer func() {
 		if reason := recover(); reason != nil {
-			f.shared().log.errorf("cordis: panic while disposing %s of plugin %s: %v",
+			f.shared().log.errorf("panic while disposing %s of plugin %s: %v",
 				entry.meta.Label, f.Name(), reason)
 		}
 	}()
@@ -701,7 +701,7 @@ func (f *Fiber) fail(err error) {
 		return
 	}
 	f.setState(StateFailed)
-	f.shared().log.errorf("cordis: plugin %s failed to load: %v", f.Name(), err)
+	f.shared().log.errorf("plugin %s failed to load: %v", f.Name(), err)
 }
 
 // unload releases the current generation of effects.
