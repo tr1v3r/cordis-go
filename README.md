@@ -343,7 +343,7 @@ make ci      # CI 跑的东西：gofmt 检查 + go vet + staticcheck + revive + 
 | `make vet` | `go vet ./...` |
 | `make lint` | gofmt 检查 + `go vet` + `staticcheck` + `revive -config .revive.toml` |
 | `make test` | `go test -race ./...` |
-| `make benchsmoke` | 把 88 个 benchmark 各跑一次（`-benchtime=1x`）并带 `-race`；每个用例都自校验结果，所以这是"基准测试本身没坏"的门禁，`make ci` 会跑 |
+| `make benchsmoke` | 把 90 个 benchmark 各跑一次（`-benchtime=1x`）并带 `-race`；每个用例都自校验结果，所以这是"基准测试本身没坏"的门禁，`make ci` 会跑 |
 | `make benchmark` | 对 Context、服务、事件、Fiber 与 loader 热路径运行 benchmark，并报告内存分配；可用 `BENCHTIME=3s` 延长采样 |
 | `make baseline` | 记录本平台的基线到 `benchmarks/baseline-<goos>-<goarch>.txt`（`CHECKTIME`/`CHECKCOUNT` 控制采样） |
 | `make benchcheck` | 重跑一遍并与基线对比，**时间或分配回归就非零退出**；针对 `cmd/benchcheck` |
@@ -378,11 +378,15 @@ make ci      # CI 跑的东西：gofmt 检查 + go vet + staticcheck + revive + 
   嵌套 group、`insert`、`Strict`）；树查询（`Find` 命中与未命中、`Size`）与
   `Dump`/`DumpString`；树装载（1/10/100 个插件、分组 fork）；注册表
   `Register`/`Has`/`Names`
-- **并发**（`b.RunParallel`）：服务查找、事件分发、并发加载同一个 plugin 定义的装载/卸载，
-  以及在同一 fiber 的多个隔离作用域里并发注册服务。这四条测的是争用下的**聚合**吞吐（ns/op
-  是墙钟时间除以总迭代数），和上面单 goroutine 的延迟数字含义不同：读路径在 12 路争用下比
-  单线程慢约 7 倍（`fiber.mu` 在每次查找里都是独占加锁），并发装载则只比串行慢约 2 倍。
-  最后一条正是当初查出并发注册缺陷的用例
+- **并发**（`b.RunParallel`）：服务查找、事件分发、并发加载同一个 plugin 定义的装载/卸载、
+  在同一 fiber 的多个隔离作用域里并发注册服务，以及并发注册+注销 effect（`OnDispose` 与
+  `Effect` 两种形状）。这六条测的是争用下的**聚合**吞吐（ns/op 是墙钟时间除以总迭代数），和上面
+  单 goroutine 的延迟数字含义不同：读路径在 12 路争用下比单线程慢约 7 倍，并发装载只比串行慢约
+  2 倍；并发注册服务那条正是当初查出并发注册缺陷的用例。
+  ⚠️ **读路径那把锁实测过，别再重复试**：给服务快照单独换一把 `RWMutex` 反而让 12 路争用
+  **慢 24%**（108→134ns，五次中位数）——临界区只有一次 map 查找，`RWMutex` 的额外记账比它
+  省下的串行化更贵。唯一还剩的杠杆是无锁快照指针（`atomic.Pointer`），代价是每次注册多一次
+  分配，会触发分配门禁
 
 ⚠️ **相对 #56 之前的实现**（同机背靠背 A/B：两边各 `-benchtime=1s -count=2` 取中位数）
 唯一实质变化是 **`Waterfall`**：1/10/100 监听器的分发由 70/388/3497ns 变为
@@ -477,7 +481,7 @@ make benchcheck BENCHCHECKFLAGS=-allow-missing   # 删掉用例时只告警
   基线上的量级，会随提交变化（加一个测试就会动），所以这里不写死——要当前值就跑那条命令。
   `examples/` 不在统计里（六个示例由 `make examples` 在 CI 里逐个执行）；`cmd/cordis` 的退出码契约由它自己的进程内测试
   钉住（`--help` / 用法错误 / 加载失败三档）
-- 性能基准 88 个场景（`make benchmark`，见「性能基准」），全部带分配统计与结果自校验；
+- 性能基准 90 个场景（`make benchmark`，见「性能基准」），全部带分配统计与结果自校验；
   `make ci` 会跑 `benchsmoke` 执行每个用例一次（含 `-race`），数字回归则交给
   `make benchcheck` 与提交的基线对比（见「性能回归门禁」）。
   ⚠️ 测 benchmark 时别同时跑别的重活：并发负载会污染采样（本仓库就踩过一次，
