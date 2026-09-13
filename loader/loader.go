@@ -11,6 +11,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"sort"
 	"sync"
@@ -48,6 +49,9 @@ type Layer struct {
 }
 
 // ParseLayer decodes a JSON array of entries as a base layer.
+//
+// Numbers are decoded as json.Number rather than float64, so an integer beyond
+// 2^53 keeps its exact value on the way into a plugin config and into Dump.
 func ParseLayer(label string, data []byte) (Layer, error) {
 	entries, err := parseEntries(label, data)
 	if err != nil {
@@ -57,6 +61,8 @@ func ParseLayer(label string, data []byte) (Layer, error) {
 }
 
 // ParsePatchLayer decodes a JSON array of entries as a patch layer.
+//
+// Numbers are decoded as json.Number exactly as ParseLayer does.
 func ParsePatchLayer(label string, data []byte) (Layer, error) {
 	entries, err := parseEntries(label, data)
 	if err != nil {
@@ -65,10 +71,25 @@ func ParsePatchLayer(label string, data []byte) (Layer, error) {
 	return Layer{Label: label, Entries: entries, Patch: true}, nil
 }
 
+// parseEntries decodes a layer file.
+//
+// It asks the decoder for json.Number instead of float64: the default decode
+// rounds every integer beyond 2^53, so a config a file spells 9007199254740993
+// would reach the plugin as 9007199254740992 with nothing to signal the loss.
+// The values stay as text until decodeConfig hands them to the target type,
+// which restores the usual encoding/json shapes for interface fields.
 func parseEntries(label string, data []byte) ([]*Patch, error) {
 	var entries []*Patch
-	if err := json.Unmarshal(data, &entries); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	if err := decoder.Decode(&entries); err != nil {
 		return nil, fmt.Errorf("layer %s: %w", label, err)
+	}
+	// Decode consumes one value and stops, where json.Unmarshal rejected
+	// leftovers. A layer file is exactly one array, so keep rejecting anything
+	// after it instead of silently reading a prefix.
+	if _, err := decoder.Token(); err != io.EOF {
+		return nil, fmt.Errorf("layer %s: unexpected data after the top-level value", label)
 	}
 	return entries, nil
 }
