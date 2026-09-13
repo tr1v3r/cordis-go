@@ -6,10 +6,18 @@
 # generic methods and reports the affected files as syntax errors.
 
 ignore-generated-header = false
+# The exit status revive 1.16 derives from its findings: the first finding that
+# passes `confidence` sets the status to warning-code, and a finding whose rule
+# (or directive) declares severity = "error" sets it to error-code instead.
+# Revive resolves severity per rule, so the top-level `severity` key does not
+# decide this - with the stock rule set every finding is a warning and
+# warning-code alone decides. It has to stay non-zero: with 0 a run that reports
+# violations still exits 0, which silently turns the revive step of `make lint`
+# into a no-op.
 severity = "warning"
 confidence = 0.8
 error-code = 0
-warning-code = 0
+warning-code = 1
 
 [rule.blank-imports]
 [rule.context-as-argument]
