@@ -229,8 +229,9 @@ go run ./cmd/cordis dump --strict base.json profile.json   # 未匹配的补丁 
 go run ./cmd/cordis dump --patch=base.json base.json       # 强制第一个文件按 patch 层解析
 ```
 
-`--patch=<path>` 可以重复，被点名的文件无论出现在哪个位置（包括第一个）都按 patch 层解析，
-显式标记优先于「第一个文件是 base 层」和 `.patch.json` 后缀两条规则。显式请求帮助用
+`--patch=<path>` 可以重复，被点名的文件无论出现在哪个位置（包括第一个）都按 patch 层解析。
+显式标记覆盖的只是「第一个文件按 base 层解析」这条默认规则：`.patch.json` 结尾的第一个文件
+本来就是 patch 层，标记对它没有额外影响。显式请求帮助用
 `-h` / `--help`：用法打到 stdout 并以 0 退出；用法错误（未知命令、未知 flag、缺少参数）把用法
 打到 stderr 并以 2 退出；加载或组合失败以 1 退出。
 
@@ -334,7 +335,8 @@ make ci      # CI 跑的东西：gofmt 检查 + go vet + staticcheck + revive + 
 - `go vet` / `go test -race` 全绿。覆盖率现场量：`go test -race -cover ./...` 给出核心包 88% 出头、
   `loader` 72.7%。这两个数字是某个 dev 基线上的量级，会随提交变化（测试数每加一个测试就变），所以
   这里不写死计数——要当前值就直接跑那条命令。`examples/` 与 `cmd/cordis` 不在这个统计里——示例靠
-  `go run` 验证，CLI 的退出码契约用构建出来的二进制逐条对（`--help` / 用法错误 / 加载失败三档）
+  `go run` 验证，`cmd/cordis` 的退出码契约由它自己的进程内测试钉住（`--help` / 用法错误 /
+  加载失败三档）
 - 交叉编译验证：linux/amd64、windows/amd64、darwin/arm64
 - ⚠️ 破坏性变更：`Definition` 不再导出；`ctx.Load` / `ctx.LoadWithInject` 改为泛型方法
   `(plugin, config)`；类型化服务访问改为方法形态——`ctx.Get` / `ctx.MustGet` / `ctx.Provide` /
