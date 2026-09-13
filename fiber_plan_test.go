@@ -77,11 +77,11 @@ func TestPlanSelectsTransition(t *testing.T) {
 			fiber := loadPlanTestFiber(t, root, tc.plugin)
 			tc.setup(fiber)
 
-			got := fiber.plan()
-			if got.action == tc.want {
+			got, _, _ := fiber.plan()
+			if got == tc.want {
 				return
 			}
-			t.Fatalf("plan action = %d, want %d", got.action, tc.want)
+			t.Fatalf("plan action = %d, want %d", got, tc.want)
 		})
 	}
 }

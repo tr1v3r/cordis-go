@@ -367,32 +367,26 @@ const (
 	actionDispose
 )
 
-// fiberPlan is the outcome of planning one transition. resolved and epoch are
-// only set for actions that run a load generation.
-type fiberPlan struct {
-	action   fiberAction
-	resolved map[string]*serviceBinding
-	epoch    string
-}
-
 // sync reconciles one fiber with its pending requests and current dependencies.
 func (f *Fiber) sync() {
-	f.apply(f.plan())
+	action, resolved, epoch := f.plan()
+	f.apply(action, resolved, epoch)
 }
 
 // plan consumes pending requests and selects the next transition without
-// mutating lifecycle state beyond clearing forceReload.
-func (f *Fiber) plan() fiberPlan {
+// mutating lifecycle state beyond clearing forceReload. resolved and epoch are
+// only meaningful for actions that run a load generation.
+func (f *Fiber) plan() (fiberAction, map[string]*serviceBinding, string) {
 	if f.root || f.runtime == nil {
-		return fiberPlan{action: actionNoop}
+		return actionNoop, nil, ""
 	}
 
 	disposed, forceReload := f.takeRequest()
 	if disposed {
-		return fiberPlan{action: actionDispose}
+		return actionDispose, nil, ""
 	}
 	if forceReload {
-		return fiberPlan{action: actionReload}
+		return actionReload, nil, ""
 	}
 
 	resolved, epoch := f.resolveInjections()
@@ -403,21 +397,22 @@ func (f *Fiber) plan() fiberPlan {
 	f.mu.Unlock()
 
 	if same {
-		return fiberPlan{action: actionNoop}
+		return actionNoop, nil, ""
 	}
 	if epoch == epochInactive {
-		return fiberPlan{action: actionUnload}
+		return actionUnload, nil, ""
 	}
 	if cleaned {
-		return fiberPlan{action: actionLoad, resolved: resolved, epoch: epoch}
+		return actionLoad, resolved, epoch
 	}
-	return fiberPlan{action: actionCycle, resolved: resolved, epoch: epoch}
+	return actionCycle, resolved, epoch
 }
 
 // apply executes a planned transition. User callbacks may run here, so f.mu is
 // never held across load or unload.
-func (f *Fiber) apply(p fiberPlan) {
-	switch p.action {
+func (f *Fiber) apply(action fiberAction, resolved map[string]*serviceBinding,
+	epoch string) {
+	switch action {
 	case actionNoop:
 		return
 	case actionUnload:
@@ -425,9 +420,9 @@ func (f *Fiber) apply(p fiberPlan) {
 	case actionDispose:
 		f.unload()
 	case actionLoad:
-		f.applyLoad(p)
+		f.applyLoad(resolved, epoch)
 	case actionCycle:
-		f.applyCycle(p)
+		f.applyCycle(resolved, epoch)
 	case actionReload:
 		f.reload()
 	}
@@ -448,28 +443,28 @@ func (f *Fiber) applyUnload() {
 
 // applyLoad commits the planned epoch and runs the plugin body on a clean
 // fiber.
-func (f *Fiber) applyLoad(p fiberPlan) {
+func (f *Fiber) applyLoad(resolved map[string]*serviceBinding, epoch string) {
 	f.mu.Lock()
 	if f.disposed {
 		f.mu.Unlock()
 		f.unload()
 		return
 	}
-	f.epoch = p.epoch
+	f.epoch = epoch
 	f.mu.Unlock()
-	f.load(p.resolved)
+	f.load(resolved)
 }
 
 // applyCycle unloads the previous generation, commits the planned epoch, and
 // loads the new generation.
-func (f *Fiber) applyCycle(p fiberPlan) {
+func (f *Fiber) applyCycle(resolved map[string]*serviceBinding, epoch string) {
 	f.mu.Lock()
 	if f.disposed {
 		f.mu.Unlock()
 		f.unload()
 		return
 	}
-	f.epoch = p.epoch
+	f.epoch = epoch
 	f.mu.Unlock()
 
 	f.unload()
@@ -481,7 +476,7 @@ func (f *Fiber) applyCycle(p fiberPlan) {
 		f.unload()
 		return
 	}
-	f.load(p.resolved)
+	f.load(resolved)
 }
 
 // reload forces an unload/reload cycle for Restart and Update. It resets the
