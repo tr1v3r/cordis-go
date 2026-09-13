@@ -412,6 +412,149 @@ func TestTreeLoadFailsOnFailedEntry(t *testing.T) {
 	}
 }
 
+// TestTreeLoadDisposesTheFailedEntry pins all-or-nothing: the entry that failed
+// owns a fiber like any other, so the rollback has to dispose it too instead of
+// leaving its effect slot and its runtime behind.
+func TestTreeLoadDisposesTheFailedEntry(t *testing.T) {
+	registry := loader.NewRegistry()
+	loader.MustRegister(registry, "ok",
+		cordis.Define[struct{}]("ok", func(*cordis.Context, struct{}) error { return nil }))
+	loader.MustRegister(registry, "bad",
+		cordis.Define[struct{}]("bad", func(*cordis.Context, struct{}) error {
+			return errors.New("boom")
+		}))
+
+	layer := loader.Layer{Label: "base", Entries: []*loader.Patch{
+		{ID: "a", Name: strptr("ok")},
+		{ID: "b", Name: strptr("bad")},
+	}}
+	tree, err := loader.Compose([]loader.Layer{layer})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	root := cordis.New()
+	before := len(root.Effects())
+	if _, err := tree.Load(root, registry); err == nil {
+		t.Fatal("want an error")
+	}
+	if got := len(root.Effects()); got != before {
+		t.Fatalf("want effects back at %d after rollback, got %d", before, got)
+	}
+	reg, ok := cordis.Get[cordis.Registry](root, "registry")
+	if !ok {
+		t.Fatal("the registry service is missing")
+	}
+	if got := reg.Plugins(); len(got) != 0 {
+		t.Fatalf("want no plugin with live fibers after rollback, got %v", got)
+	}
+}
+
+// TestTreeLoadFailedEntryInsideGroupRollsBack pins all-or-nothing across the
+// group boundary: the failure happens outside the group while the group has
+// already loaded a fiber, so the rollback must reach through the recursion and
+// the error must name the entry that actually failed.
+func TestTreeLoadFailedEntryInsideGroupRollsBack(t *testing.T) {
+	boom := errors.New("boom")
+	registry := loader.NewRegistry()
+	var events []string
+	loader.MustRegister(registry, "ok",
+		cordis.Define[struct{}]("ok", func(ctx *cordis.Context, _ struct{}) error {
+			events = append(events, "load ok")
+			ctx.OnDispose(func() { events = append(events, "dispose ok") })
+			return nil
+		}))
+	loader.MustRegister(registry, "bad",
+		cordis.Define[struct{}]("bad", func(*cordis.Context, struct{}) error { return boom }))
+
+	layer := loader.Layer{Label: "base", Entries: []*loader.Patch{
+		{ID: "grp", Group: boolptr(true), Plugins: []*loader.Patch{
+			{ID: "inner", Name: strptr("ok")},
+		}},
+		{ID: "outer", Name: strptr("bad")},
+	}}
+	tree, err := loader.Compose([]loader.Layer{layer})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	root := cordis.New()
+	before := len(root.Effects())
+	_, err = tree.Load(root, registry)
+	if err == nil {
+		t.Fatal("want an error")
+	}
+	if !errors.Is(err, boom) {
+		t.Fatalf("want the plugin's own error, got %v", err)
+	}
+	if want := `entry "outer" (bad)`; !strings.Contains(err.Error(), want) {
+		t.Fatalf("want the error to name the failed entry %q, got %q", want, err)
+	}
+	if !reflect.DeepEqual(events, []string{"load ok", "dispose ok"}) {
+		t.Fatalf("want the group's fiber rolled back too, got %v", events)
+	}
+	if got := len(root.Effects()); got != before {
+		t.Fatalf("want effects back at %d after rollback, got %d", before, got)
+	}
+	reg, ok := cordis.Get[cordis.Registry](root, "registry")
+	if !ok {
+		t.Fatal("the registry service is missing")
+	}
+	if got := reg.Plugins(); len(got) != 0 {
+		t.Fatalf("want no plugin with live fibers after rollback, got %v", got)
+	}
+}
+
+// TestTreeLoadAfterFailureLeavesAUsableContext pins the recovery half of
+// all-or-nothing: a host that fixes the configuration and loads again on the
+// same context must not inherit leftovers from the failed attempt.
+func TestTreeLoadAfterFailureLeavesAUsableContext(t *testing.T) {
+	registry := loader.NewRegistry()
+	loader.MustRegister(registry, "ok",
+		cordis.Define[struct{}]("ok", func(*cordis.Context, struct{}) error { return nil }))
+	loader.MustRegister(registry, "bad",
+		cordis.Define[struct{}]("bad", func(*cordis.Context, struct{}) error {
+			return errors.New("boom")
+		}))
+
+	failing := loader.Layer{Label: "base", Entries: []*loader.Patch{
+		{ID: "a", Name: strptr("bad")},
+	}}
+	tree, err := loader.Compose([]loader.Layer{failing})
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := cordis.New()
+	if _, err := tree.Load(root, registry); err == nil {
+		t.Fatal("want an error")
+	}
+
+	fixed := loader.Layer{Label: "base", Entries: []*loader.Patch{
+		{ID: "a", Name: strptr("ok")},
+	}}
+	tree, err = loader.Compose([]loader.Layer{fixed})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fibers, err := tree.Load(root, registry)
+	if err != nil {
+		t.Fatalf("want the context usable after a failed load, got %v", err)
+	}
+	if len(fibers) != 1 {
+		t.Fatalf("want one fiber after the reload, got %d", len(fibers))
+	}
+	if fibers[0].State() != cordis.StateActive {
+		t.Fatalf("want the reloaded fiber active, got %s", fibers[0].State())
+	}
+	reg, ok := cordis.Get[cordis.Registry](root, "registry")
+	if !ok {
+		t.Fatal("the registry service is missing")
+	}
+	if got := reg.Plugins(); !reflect.DeepEqual(got, []string{"ok"}) {
+		t.Fatalf("want only the reloaded plugin live, got %v", got)
+	}
+}
+
 func TestGroupInjectGatesChildren(t *testing.T) {
 	registry := loader.NewRegistry()
 	loader.MustRegister(registry, "child",
