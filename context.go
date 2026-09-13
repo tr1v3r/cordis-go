@@ -99,7 +99,7 @@ func New(opts ...Option) *Context {
 		// The registration can only fail because the root is already disposed: a
 		// base context cancelled before New returned fires the watcher while New
 		// is still running, and there is nothing left to stop.
-		_, _ = rootFiber.tryEffect("ctx.WithBaseContext", func() Disposer {
+		_, _ = rootFiber.tryEffect(nil, "ctx.WithBaseContext", func(*effectEntry) Disposer {
 			return func() { stopBase() }
 		})
 	}
@@ -110,12 +110,15 @@ func New(opts ...Option) *Context {
 //
 // Every context belongs to a fiber. A plugin receives the fiber's own context;
 // disposing that fiber unwinds every effect the plugin registered through it.
+// Effect bodies receive a derived Context that explicitly owns registrations
+// made through it until that body returns.
 type Context struct {
-	shared  *core
-	parent  *Context
-	fiber   *Fiber
-	isolate map[string]string
-	name    string
+	shared      *core
+	parent      *Context
+	fiber       *Fiber
+	effectOwner *effectEntry
+	isolate     map[string]string
+	name        string
 }
 
 // Root returns the application root context.
@@ -130,12 +133,19 @@ func (c *Context) Fiber() *Fiber { return c.fiber }
 // Name returns the diagnostic name of this context.
 func (c *Context) Name() string { return c.name }
 
-// Fork returns a child context that shares this context's fiber.
+// Fork returns a child context that shares this context's fiber and explicit
+// effect owner.
 //
 // It is the Go equivalent of Cordis's ctx.extend(): the child sees the same
-// services and the same effect scope, but carries its own isolate map and name.
+// services and effect ownership, but carries its own isolate map and name.
 func (c *Context) Fork(name string) *Context {
-	return &Context{shared: c.shared, parent: c, fiber: c.fiber, name: name}
+	return &Context{
+		shared:      c.shared,
+		parent:      c,
+		fiber:       c.fiber,
+		effectOwner: c.effectOwner,
+		name:        name,
+	}
 }
 
 // Isolate returns a child context in which service name resolves in a fresh
@@ -185,18 +195,30 @@ func (c *Context) Done() <-chan struct{} { return c.fiber.done }
 // OnDispose to stop resources that must not survive a reload.
 func (c *Context) Context() context.Context { return c.fiber.lifecycleCtx }
 
-// OnDispose registers a disposer owned by this context's fiber. Disposers run
-// in reverse registration order when the fiber unloads. It panics with
-// INACTIVE_EFFECT when the fiber is already disposed or unloading, matching
-// Cordis's assertActive contract.
+// OnDispose registers a disposer in this context's explicit effect scope, or
+// directly on its fiber when called through the plugin context. Disposers run in
+// reverse registration order when their owner unwinds. It panics with
+// INACTIVE_EFFECT when the fiber or explicit effect scope is already inactive.
 func (c *Context) OnDispose(fn func()) Disposer {
-	return c.fiber.onDispose(fn)
+	return c.effect("anonymous", func(*effectEntry) Disposer { return fn })
 }
 
-// Effect runs body immediately and returns an idempotent Disposer that tears
-// down whatever the body registered, mirroring ctx.effect() in Cordis.
-func (c *Context) Effect(label string, body func() Disposer) Disposer {
-	return c.fiber.effect(label, body)
+// Effect runs body immediately with a context bound to the new effect. Effects
+// registered through that context belong to this effect and unwind with it;
+// registrations through the original context remain owned by its own scope.
+// The derived context accepts registrations only until body returns. Later
+// attempts panic or return ErrInactiveEffect. The returned Disposer is
+// idempotent.
+func (c *Context) Effect(label string, body func(*Context) Disposer) Disposer {
+	return c.effect(label, func(entry *effectEntry) Disposer {
+		scope := *c
+		scope.effectOwner = entry
+		return body(&scope)
+	})
+}
+
+func (c *Context) effect(label string, body func(*effectEntry) Disposer) Disposer {
+	return c.fiber.effect(c.effectOwner, label, body)
 }
 
 // Effects returns the live effect metadata of this context's fiber.
@@ -298,9 +320,9 @@ func (c *Context) MustGet[T any](name string) T {
 	return service
 }
 
-// Provide registers a service owned by c's fiber. The type parameter is
-// inferred from service, so a caller that holds the service as an any value
-// registers it without naming a type.
+// Provide registers a service in c's explicit effect scope, or directly on its
+// fiber when no such scope is present. The type parameter is inferred from
+// service, so a caller holding an any value need not name a type.
 func (c *Context) Provide[T any](name string, service T) (Disposer, error) {
 	return provide(c, name, service, nil)
 }
@@ -312,27 +334,39 @@ func (c *Context) ProvideChecked[T any](name string, service T,
 	return provide(c, name, service, availabilityCheck)
 }
 
-// Serve registers a service and, when it implements Starter, calls Start after
-// registration; a failed Start rolls the registration back. On dispose it calls
-// Stop (if implemented) before unregistering, because Stop is registered later
-// and disposers run in reverse order.
+// Serve registers a service in one effect, then calls Start when implemented.
+// A failed Start rolls the registration back. Its disposer calls Stop after a
+// successful Start and before unregistering the service, even when the owning
+// lifetime begins unwinding while Start is still running.
 func (c *Context) Serve[T any](name string, service T) (T, error) {
-	disposer, err := provide(c, name, service, nil)
+	var serveErr error
+	disposer, err := c.fiber.tryEffect(c.effectOwner, fmt.Sprintf("ctx.Serve(%q)", name),
+		func(entry *effectEntry) Disposer {
+			scope := *c
+			scope.effectOwner = entry
+			if _, serveErr = provide(&scope, name, service, nil); serveErr != nil {
+				return nil
+			}
+			if starter, ok := any(service).(Starter); ok {
+				if serveErr = starter.Start(); serveErr != nil {
+					return nil
+				}
+			}
+			if stopper, ok := any(service).(Stopper); ok {
+				return func() {
+					if stopErr := stopper.Stop(); stopErr != nil {
+						c.Logger().Error("service %s: Stop failed: %v", name, stopErr)
+					}
+				}
+			}
+			return nil
+		})
 	if err != nil {
 		return service, err
 	}
-	if starter, ok := any(service).(Starter); ok {
-		if err := starter.Start(); err != nil {
-			disposer()
-			return service, err
-		}
-	}
-	if stopper, ok := any(service).(Stopper); ok {
-		c.OnDispose(func() {
-			if err := stopper.Stop(); err != nil {
-				c.Logger().Error("service %s: Stop failed: %v", name, err)
-			}
-		})
+	if serveErr != nil {
+		disposer()
+		return service, serveErr
 	}
 	return service, nil
 }

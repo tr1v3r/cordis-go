@@ -1009,7 +1009,7 @@ func TestEffectRegisteredWhileDisposingIsUnwound(t *testing.T) {
 		t.Fatal(err)
 	}
 	unwound := 0
-	fiber.Ctx.Effect("racy", func() cordis.Disposer {
+	fiber.Ctx.Effect("racy", func(*cordis.Context) cordis.Disposer {
 		fiber.Dispose()
 		return func() { unwound++ }
 	})
@@ -1080,9 +1080,9 @@ func TestErrorClearedAfterSuccessfulReload(t *testing.T) {
 func TestEffectChildren(t *testing.T) {
 	root := cordis.New()
 	plugin := cordis.Define[struct{}]("p", func(ctx *cordis.Context, _ struct{}) error {
-		ctx.Effect("outer", func() cordis.Disposer {
-			ctx.OnDispose(func() {})
-			ctx.OnDispose(func() {})
+		ctx.Effect("outer", func(scope *cordis.Context) cordis.Disposer {
+			scope.OnDispose(func() {})
+			scope.OnDispose(func() {})
 			return func() {}
 		})
 		return nil
@@ -1179,6 +1179,9 @@ func TestServeRollsBackOnStartError(t *testing.T) {
 	if _, ok := cordis.Get[*startableService](root, "svc"); ok {
 		t.Fatal("failed Start must roll the registration back")
 	}
+	if service.stopped {
+		t.Fatal("failed Start must not call Stop")
+	}
 }
 
 func TestIsolateSharedJoinsScope(t *testing.T) {
@@ -1213,8 +1216,8 @@ func TestDisposingEffectDisposesNestedEffects(t *testing.T) {
 	var outer cordis.Disposer
 	unwound := 0
 	plugin := cordis.Define[struct{}]("p", func(ctx *cordis.Context, _ struct{}) error {
-		outer = ctx.Effect("outer", func() cordis.Disposer {
-			ctx.OnDispose(func() { unwound++ })
+		outer = ctx.Effect("outer", func(scope *cordis.Context) cordis.Disposer {
+			scope.OnDispose(func() { unwound++ })
 			return func() {}
 		})
 		return nil

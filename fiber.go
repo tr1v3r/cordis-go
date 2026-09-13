@@ -108,12 +108,6 @@ type Fiber struct {
 	// stays true for an active fiber even when it registered no effects.
 	live bool
 
-	// current is the effect whose body is running; registrations inside it
-	// become its children. It is always nil or an entry whose body is still
-	// running, so a registration can never nest under an effect that is already
-	// finished or unwound.
-	current *effectEntry
-
 	// parentEffectDisposer releases this fiber's slot in the parent's tree.
 	parentEffectDisposer Disposer
 }
@@ -171,6 +165,9 @@ func newFiber(parentCtx *Context, runtime *runtime, cfg any,
 	fiber.UID = parentCtx.shared.nextUID()
 	fiber.Ctx = parentCtx.Fork(runtime.name)
 	fiber.Ctx.fiber = fiber
+	// A plugin starts a new fiber-level effect scope even when its parent was
+	// loaded through a context bound to an enclosing effect.
+	fiber.Ctx.effectOwner = nil
 	return fiber
 }
 
@@ -180,31 +177,33 @@ func newFiber(parentCtx *Context, runtime *runtime, cfg any,
 func (f *Fiber) start() error {
 	parent := f.Parent
 
-	// The parent owns the child lifetime: disposing the parent disposes every
-	// plugin loaded beneath it. Registering it as a fiber-level effect keeps
-	// concurrent loads of one plugin from adopting each other's lifetime entry;
-	// tryFiberEffect still reports an unloading parent as an error, so Load
-	// fails instead of panicking out of the constructor.
-	parentEffectDisposer, err := parent.fiber.tryFiberEffect("child",
-		func() Disposer { return f.Dispose })
+	// The context used for Load explicitly chooses the child lifetime: a context
+	// passed to an effect body attaches it to that effect, while the plugin
+	// context keeps it at fiber level. Concurrent loads no longer infer ownership
+	// from shared mutable state.
+	parentEffectDisposer, err := parent.fiber.tryEffect(parent.effectOwner, "child",
+		func(*effectEntry) Disposer {
+			// Publish before installing f.Dispose. If the parent starts unwinding
+			// concurrently, the child entry defers that disposer until this body
+			// returns, so removal cannot race ahead of attachment or its event.
+			f.shared().attachFiber(f.runtime, f)
+			f.shared().bus.emitInternal("internal/plugin", &PluginEvent{Fiber: f})
+			return f.disposeFromParent
+		})
 	if err != nil {
 		return err
 	}
 	f.mu.Lock()
 	if f.disposed {
-		// The parent unloaded while this fiber was attaching, so Dispose
-		// already released everything the fiber owns. It never takes a slot in
-		// its runtime: a fiber attached after its own disposal could not be
-		// removed again.
+		// A plugin-event listener or the parent disposed the fiber while it was
+		// attaching. The runtime slot was already released by Dispose; release
+		// the child entry as well instead of storing an unreachable handle.
 		f.mu.Unlock()
 		parentEffectDisposer()
-		f.shared().discardRuntime(f.runtime)
 		return nil
 	}
 	f.parentEffectDisposer = parentEffectDisposer
 	f.mu.Unlock()
-	f.shared().attachFiber(f.runtime, f)
-	f.shared().bus.emitInternal("internal/plugin", &PluginEvent{Fiber: f})
 	f.refresh()
 	return nil
 }
@@ -283,15 +282,12 @@ func (f *Fiber) Effects() []*EffectMeta {
 	return out
 }
 
-// onDispose registers a raw disposer on the fiber.
-func (f *Fiber) onDispose(fn func()) Disposer {
-	return f.effect("anonymous", func() Disposer { return fn })
-}
-
-// effect registers a reversible side effect, mirroring Fiber#effect(). It
-// panics with INACTIVE_EFFECT when the fiber is gone, like Cordis does.
-func (f *Fiber) effect(label string, body func() Disposer) Disposer {
-	disposer, err := f.tryEffect(label, body)
+// effect registers a reversible side effect under owner, or directly on the
+// fiber when owner is nil. It panics with INACTIVE_EFFECT when either lifetime
+// is inactive.
+func (f *Fiber) effect(owner *effectEntry, label string,
+	body func(*effectEntry) Disposer) Disposer {
+	disposer, err := f.tryEffect(owner, label, body)
 	if err != nil {
 		panic(err)
 	}
@@ -302,35 +298,10 @@ func (f *Fiber) effect(label string, body func() Disposer) Disposer {
 //
 // The entry is published before the body runs. If the body disposes the fiber,
 // or another goroutine unloads it while the body runs, the teardown is deferred
-// to this function instead of being lost.
-//
-// Nesting is decided per registration and never on stale state: the entry
-// adopts a nested effect only while its own body runs, a registration that
-// finds a finished enclosing effect becomes a fiber-level one instead, and the
-// scope is restored to the nearest body that is still running (or to the fiber
-// level). Concurrent registrations therefore cannot attach an effect to an
-// entry that will never unwind it.
-func (f *Fiber) tryEffect(label string, body func() Disposer) (Disposer, error) {
-	return f.tryScopedEffect(label, body, true)
-}
-
-// tryFiberEffect registers an effect that belongs to the fiber itself. It takes
-// no part in effect nesting: it never becomes a scope for later registrations,
-// and it is never adopted by the scope that happens to be running.
-//
-// The child lifetime a load takes on its parent is registered this way. Loads
-// run on their own goroutines while f.current is per fiber, so a nesting
-// registration would let two concurrent loads of the same plugin adopt each
-// other's lifetime entry - disposing either fiber would then unwind the other
-// with it, through no fault of its own.
-func (f *Fiber) tryFiberEffect(label string, body func() Disposer) (Disposer, error) {
-	return f.tryScopedEffect(label, body, false)
-}
-
-// tryScopedEffect is the shared body of tryEffect and tryFiberEffect. A scoped
-// registration consults and updates f.current; an unscoped one is added to the
-// fiber's own list and leaves the scope marker alone.
-func (f *Fiber) tryScopedEffect(label string, body func() Disposer, scoped bool) (Disposer, error) {
+// to this function instead of being lost. Its parent is explicit: nil means the
+// fiber itself, while a non-nil owner must still be executing its body.
+func (f *Fiber) tryEffect(owner *effectEntry, label string,
+	body func(*effectEntry) Disposer) (Disposer, error) {
 	f.mu.Lock()
 	if f.disposed || f.state == StateUnloading {
 		f.mu.Unlock()
@@ -338,39 +309,25 @@ func (f *Fiber) tryScopedEffect(label string, body func() Disposer, scoped bool)
 			"cannot create effect on inactive context %q", f.Name())
 	}
 	entry := &effectEntry{meta: &EffectMeta{Label: label}, running: true}
-	var parentEffect *effectEntry
 	var remove func() bool
-	if scoped {
-		parentEffect = f.current
-		if parentEffect != nil && !parentEffect.adopt(entry) {
-			// The enclosing effect finished (or was unwound) meanwhile; owning
-			// the entry there would leave its disposer unreachable.
-			parentEffect = nil
+	if owner != nil {
+		if !owner.adopt(entry) {
+			f.mu.Unlock()
+			return nil, newError(ErrInactiveEffect,
+				"cannot create effect in inactive scope %q of context %q",
+				owner.meta.Label, f.Name())
 		}
-		if parentEffect == nil {
-			_, remove = f.disposables.add(entry)
-		}
-		f.current = entry
 	} else {
 		_, remove = f.disposables.add(entry)
 	}
 	f.mu.Unlock()
 
-	dispose, panicked := runEffectBody(body)
+	dispose, panicked := runEffectBody(func() Disposer { return body(entry) })
 	entry.finishBody()
 
-	f.mu.Lock()
-	if scoped && f.current == entry {
-		// Restore the enclosing scope. A registration from another goroutine may
-		// be current by now: leave it alone rather than clobbering it with this
-		// call's captured parent.
-		f.current = parentEffect.runningAncestor()
-	}
-	f.mu.Unlock()
-
 	if panicked != nil {
-		if parentEffect != nil {
-			parentEffect.detach(entry)
+		if owner != nil {
+			owner.detach(entry)
 		} else {
 			remove()
 		}
@@ -383,17 +340,20 @@ func (f *Fiber) tryScopedEffect(label string, body func() Disposer, scoped bool)
 		dispose = func() {}
 	}
 	if entry.setDispose(dispose) {
-		// The owning fiber unloaded while the body ran; unwind immediately.
+		// The owning fiber or effect unloaded while the body ran; unwind now.
 		f.runDisposer(entry)
 		return func() {}, nil
 	}
 	return Once(func() {
-		if parentEffect != nil {
-			parentEffect.detach(entry)
+		// Keep the entry reachable until its shared cleanup finishes. If its
+		// owner starts unwinding concurrently, both paths meet at releaseOnce
+		// and neither can return while the other's cleanup is still running.
+		f.runDisposer(entry)
+		if owner != nil {
+			owner.detach(entry)
 		} else {
 			remove()
 		}
-		f.runDisposer(entry)
 	}), nil
 }
 
@@ -403,16 +363,17 @@ func runEffectBody(body func() Disposer) (dispose Disposer, panicked any) {
 }
 
 func (f *Fiber) runDisposer(entry *effectEntry) {
-	dispose, children := entry.take()
-	if dispose == nil && children == nil {
-		// Already unwound, or still being set up by its own body.
+	if !entry.requestDispose() {
 		return
 	}
-	if dispose != nil {
-		f.callDisposer(entry, dispose)
-	}
-	// Nested effects unwind after their owner, newest first.
-	f.unwindChildren(children)
+	entry.releaseOnce.Do(func() {
+		dispose, children := entry.claimDispose()
+		if dispose != nil {
+			f.callDisposer(entry, dispose)
+		}
+		// Nested effects unwind after their owner, newest first.
+		f.unwindChildren(children)
+	})
 }
 
 // unwindChildren disposes nested effects newest-first, after their owner.
@@ -798,6 +759,16 @@ func (f *Fiber) notifyProvided() {
 	for _, name := range f.shared().providedNames(f) {
 		f.shared().notify(name, f.Ctx.isolateLabel(name))
 	}
+}
+
+// disposeFromParent breaks the parent-entry handle cycle before disposal. A
+// child disposed independently uses that handle to detach itself; a parent that
+// is already running the entry must not re-enter the same waitable release.
+func (f *Fiber) disposeFromParent() {
+	f.mu.Lock()
+	f.parentEffectDisposer = nil
+	f.mu.Unlock()
+	f.Dispose()
 }
 
 // Dispose starts unloading the plugin and releases everything it registered. It

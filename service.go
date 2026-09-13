@@ -68,35 +68,42 @@ func provide(c *Context, name string, service any,
 		return nil, newError(ErrInactiveEffect,
 			"cannot provide service %q on inactive context %q", name, ownerFiber.Name())
 	}
-	if err := c.shared.registerService(binding); err != nil {
+	var registerErr error
+	disposer, err := ownerFiber.tryEffect(c.effectOwner, fmt.Sprintf("ctx.Provide(%q)", name),
+		func(*effectEntry) Disposer {
+			// Publish only after the effect entry has a reachable owner. An expired
+			// explicit scope must never expose a binding that it cannot unwind.
+			if registerErr = c.shared.registerService(binding); registerErr != nil {
+				return nil
+			}
+
+			// A service is visible to its own provider immediately, so a plugin may
+			// call the service it provides. Pending fibers have no resolved services
+			// yet; their snapshot is built when they load.
+			ownerFiber.mu.Lock()
+			if ownerFiber.resolvedServices != nil {
+				ownerFiber.resolvedServices[name] = binding
+			}
+			ownerFiber.mu.Unlock()
+
+			if ownerFiber.State() == StateActive {
+				c.shared.notify(name, scopeLabel)
+			}
+
+			return func() {
+				c.shared.unregisterService(binding)
+				c.shared.notify(name, scopeLabel)
+				ownerFiber.mu.Lock()
+				delete(ownerFiber.resolvedServices, name)
+				ownerFiber.mu.Unlock()
+			}
+		})
+	if err != nil {
 		return nil, err
 	}
-
-	disposer, err := ownerFiber.tryEffect(fmt.Sprintf("ctx.Provide(%q)", name), func() Disposer {
-		// A service is visible to its own provider immediately, so a plugin may
-		// call the service it provides. Pending fibers have no resolved services
-		// yet; their snapshot is built when they load.
-		ownerFiber.mu.Lock()
-		if ownerFiber.resolvedServices != nil {
-			ownerFiber.resolvedServices[name] = binding
-		}
-		ownerFiber.mu.Unlock()
-
-		if ownerFiber.State() == StateActive {
-			c.shared.notify(name, scopeLabel)
-		}
-
-		return func() {
-			c.shared.unregisterService(binding)
-			c.shared.notify(name, scopeLabel)
-			ownerFiber.mu.Lock()
-			delete(ownerFiber.resolvedServices, name)
-			ownerFiber.mu.Unlock()
-		}
-	})
-	if err != nil {
-		c.shared.unregisterService(binding)
-		return nil, err
+	if registerErr != nil {
+		disposer()
+		return nil, registerErr
 	}
 	return disposer, nil
 }

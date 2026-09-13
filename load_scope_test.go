@@ -29,13 +29,13 @@ func TestLoadDoesNotJoinARunningEffectBody(t *testing.T) {
 		return nil
 	})
 
-	// Park an effect body on another goroutine, so the fiber's scope marker is
-	// held by work this test is not doing.
+	// Park an effect body on another goroutine. A load through the original
+	// context must remain at fiber level rather than joining that explicit scope.
 	entered := make(chan struct{})
 	release := make(chan struct{})
 	outer := make(chan cordis.Disposer, 1)
 	go func() {
-		outer <- root.Effect("outer", func() cordis.Disposer {
+		outer <- root.Effect("outer", func(*cordis.Context) cordis.Disposer {
 			close(entered)
 			<-release
 			return func() {}
@@ -70,8 +70,8 @@ func TestLoadDoesNotJoinARunningEffectBody(t *testing.T) {
 }
 
 func TestConcurrentLoadsKeepIndependentLifetimes(t *testing.T) {
-	// Two loads of one plugin run on their own goroutines while the scope marker
-	// is per fiber, so one load must not adopt the other's lifetime entry.
+	// Two loads through the same plugin context both have an explicit nil owner,
+	// so neither may adopt the other's lifetime entry.
 	for round := 0; round < 25; round++ {
 		root := cordis.New()
 		plugin := cordis.Define[struct{}]("twin", func(*cordis.Context, struct{}) error {

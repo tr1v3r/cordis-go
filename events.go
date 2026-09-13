@@ -66,7 +66,8 @@ func WithOnce() EventOption {
 	return func(o *eventOptions) { o.once = true }
 }
 
-// On registers a typed listener owned by the context's fiber.
+// On registers a typed listener owned by the context's explicit effect scope,
+// or by its fiber when no such scope is present.
 func (c *Context) On[E any](name string, fn func(E), opts ...EventOption) Disposer {
 	return c.on(name, func(payload any, _ func(any) any) any {
 		fn(assertPayload[E](name, payload))
@@ -127,7 +128,7 @@ func (c *Context) on(name string, fn func(any, func(any) any) any, opts ...Event
 		once:    options.once,
 	}
 	bus := c.shared.bus
-	disposer := c.fiber.effect(fmt.Sprintf("ctx.On(%q)", name), func() Disposer {
+	disposer := c.effect(fmt.Sprintf("ctx.On(%q)", name), func(*effectEntry) Disposer {
 		bus.add(listener)
 		return func() { bus.remove(listener) }
 	})

@@ -70,10 +70,10 @@ func TestIntegrationConcurrentLoadDisposeReloadStress(t *testing.T) {
 	worker := cordis.Define[struct{}]("rt-stress-worker",
 		func(ctx *cordis.Context, _ struct{}) error {
 			runs.Add(1)
-			ctx.Effect("rt-outer", func() cordis.Disposer {
-				cordis.On(ctx, "rt-tick", func(struct{}) { ticks.Add(1) })
-				cordis.OnOnce(ctx, "rt-boot", func(struct{}) { boots.Add(1) })
-				ctx.OnDispose(func() { innerW.Add(1) })
+			ctx.Effect("rt-outer", func(scope *cordis.Context) cordis.Disposer {
+				cordis.On(scope, "rt-tick", func(struct{}) { ticks.Add(1) })
+				cordis.OnOnce(scope, "rt-boot", func(struct{}) { boots.Add(1) })
+				scope.OnDispose(func() { innerW.Add(1) })
 				return func() { outerW.Add(1) }
 			})
 			ctx.OnDispose(func() { genW.Add(1) })
@@ -88,8 +88,8 @@ func TestIntegrationConcurrentLoadDisposeReloadStress(t *testing.T) {
 	ephemeral := cordis.Define[struct{}]("rt-stress-ephemeral",
 		func(ctx *cordis.Context, _ struct{}) error {
 			ephRuns.Add(1)
-			ctx.Effect("rt-eph", func() cordis.Disposer {
-				cordis.OnOnce(ctx, "rt-eph-boot", func(struct{}) {})
+			ctx.Effect("rt-eph", func(scope *cordis.Context) cordis.Disposer {
+				cordis.OnOnce(scope, "rt-eph-boot", func(struct{}) {})
 				return func() { ephW.Add(1) }
 			})
 			return nil
@@ -219,6 +219,7 @@ func TestIntegrationEffectAdoptionRacingExternalDispose(t *testing.T) {
 
 	var outerW, innerW, listenerHits atomic.Int32
 	outerBodyEntered := make(chan struct{})
+	outerScope := make(chan *cordis.Context, 1)
 	releaseOuterBody := make(chan struct{})
 	outerReturned := make(chan struct{})
 	innerEntered := make(chan struct{})
@@ -228,19 +229,21 @@ func TestIntegrationEffectAdoptionRacingExternalDispose(t *testing.T) {
 	plugin := cordis.Define[struct{}]("rt-adopt", func(ctx *cordis.Context, _ struct{}) error {
 		go func() {
 			defer close(outerReturned)
-			ctx.Effect("rt-outer", func() cordis.Disposer {
+			ctx.Effect("rt-outer", func(scope *cordis.Context) cordis.Disposer {
+				outerScope <- scope
 				close(outerBodyEntered)
 				<-releaseOuterBody
 				return func() { outerW.Add(1) }
 			})
 		}()
 		<-outerBodyEntered
+		scope := <-outerScope
 		go func() {
-			ctx.Effect("rt-inner", func() cordis.Disposer {
+			scope.Effect("rt-inner", func(inner *cordis.Context) cordis.Disposer {
 				// Registered before the listener, so it unwinds after it and
 				// its run proves the listener left the bus.
-				ctx.OnDispose(func() { close(listenerGone) })
-				cordis.On(ctx, "rt-adopt-ev", func(struct{}) { listenerHits.Add(1) })
+				inner.OnDispose(func() { close(listenerGone) })
+				cordis.On(inner, "rt-adopt-ev", func(struct{}) { listenerHits.Add(1) })
 				close(innerEntered)
 				<-releaseInnerBody
 				return func() { innerW.Add(1) }
@@ -254,8 +257,8 @@ func TestIntegrationEffectAdoptionRacingExternalDispose(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// rt-inner is adopted by rt-outer and the listener by rt-inner; the fiber
-	// is disposed while both bodies are parked inside their adoptions.
+	// rt-inner is explicitly owned by rt-outer and the listener by rt-inner; the
+	// fiber is disposed while both bodies are parked inside their scopes.
 	fiber.Dispose()
 	if got := fiber.State(); got != cordis.StateDisposed {
 		t.Fatalf("want fiber state disposed, got %s", got)
@@ -288,7 +291,7 @@ func TestIntegrationEffectAdoptionRacingExternalDispose(t *testing.T) {
 	// than parked where no unload could ever reach it.
 	reason := func() (reason any) {
 		defer func() { reason = recover() }()
-		fiber.Ctx.Effect("rt-late", func() cordis.Disposer { return func() {} })
+		fiber.Ctx.Effect("rt-late", func(*cordis.Context) cordis.Disposer { return func() {} })
 		return nil
 	}()
 	failure, ok := reason.(error)
@@ -435,8 +438,8 @@ func TestIntegrationOnceUnwoundByDisposeAndReload(t *testing.T) {
 	var soloFired, ownerW atomic.Int32
 	disposeOnly := cordis.Define[struct{}]("rt-solo-a",
 		func(ctx *cordis.Context, _ struct{}) error {
-			ctx.Effect("rt-solo-owner", func() cordis.Disposer {
-				cordis.OnOnce(ctx, "rt-solo", func(struct{}) { soloFired.Add(1) })
+			ctx.Effect("rt-solo-owner", func(scope *cordis.Context) cordis.Disposer {
+				cordis.OnOnce(scope, "rt-solo", func(struct{}) { soloFired.Add(1) })
 				return func() { ownerW.Add(1) }
 			})
 			return nil

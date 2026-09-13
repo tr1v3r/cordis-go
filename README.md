@@ -37,8 +37,8 @@ fiber, err := rootCtx.Load(plugin, dbConfig{Path: "app.db"})
 | `ctx.foo` | `ctx.Get[*Foo]("foo")` | Go 没有 Proxy，改为显式、类型安全的查找 |
 | `ctx.plugin(p, cfg)` | `ctx.Load(p, cfg)` | 返回 `*Fiber`；同一个 plugin 加载两次 = 两个 fiber |
 | `ctx.inject(deps, cb)` | `cordis.Inject(ctx, deps, cb)` | 依赖就绪前挂起，变更时自动重载 |
-| `ctx.provide(name, v)` | `ctx.Provide(name, v)` | 类型参数从 `v` 推断；返回 `(Disposer, error)`，所有权属于当前 fiber |
-| `ctx.effect(fn)` | `ctx.Effect(label, body)` | 可逆副作用 |
+| `ctx.provide(name, v)` | `ctx.Provide(name, v)` | 类型参数从 `v` 推断；返回 `(Disposer, error)`；插件 ctx 归 fiber，Effect scope 归 effect |
+| `ctx.effect(fn)` | `ctx.Effect(label, func(scope *Context) Disposer)` | 显式作用域的可逆副作用 |
 | `ctx.on / emit / bail / waterfall` | `ctx.On` / `ctx.Emit` / `ctx.Bail` / `ctx.Waterfall` | 泛型事件，payload 类型在编译期确定；注册与分发都是 Context 方法，包级同名函数是等价形态 |
 | `ctx.isolate(name)` | `ctx.Isolate(name)` / `ctx.IsolateShared(name, label)` | 服务按作用域 label 索引；同一 label 让两个作用域合并，但该 label 全应用只对应一个服务名（见「Service 与 Inject」） |
 | `ctx.extend()` | `ctx.Fork(name)` | 共享 fiber 的子上下文 |
@@ -49,8 +49,9 @@ fiber, err := rootCtx.Load(plugin, dbConfig{Path: "app.db"})
 
 ### 1. Context — 依赖容器与生命周期作用域
 
-`Context` 既是服务查找的入口，也是副作用的归属边界。`ctx.OnDispose` 注册的所有回收动作，
-在所属 fiber 卸载时按 **后进先出** 执行。
+`Context` 既是服务查找的入口，也是副作用的归属边界。插件原始 `ctx` 的注册归 fiber；
+`Effect` body 收到的派生 Context 则归该 effect。`OnDispose` 注册的回收动作在所属生命周期结束时按
+**后进先出** 执行。
 
 ```go
 ctx.OnDispose(func() { order = append(order, "first") })
@@ -109,8 +110,26 @@ Cordis 的一切副作用都通过 `ctx` 注册，因此卸载时可以精确回
 `Disposer`（幂等）与 `EffectMeta`（诊断标签，见 `fiber.Effects()`，嵌套关系通过
 `Children()` 展开）。
 
-在某个 `Effect` 的 body 里注册的副作用**归该 effect 所有**：销毁外层 effect 会连带
-销毁内层，这与 Cordis 的 effect 收集器一致。
+`Effect` 的 body 会收到一个显式绑定当前 effect 的派生 Context；通过它注册的 `Effect`、
+`On*`、`OnDispose`、`Provide*`、`Serve`、`Load*` 与 `Inject` 都归当前 effect 所有。销毁外层
+会连带销毁它们，这与 Cordis 的 effect 收集器一致：
+
+```go
+outer := ctx.Effect("server", func(scope *cordis.Context) cordis.Disposer {
+    scope.On("request", handleRequest) // 随 server 一起注销
+    scope.Load(metricsPlugin, struct{}{})
+    go server.Serve()
+    return func() { server.Close() }
+})
+```
+
+原来的 `ctx` 不会被改写；在 body 中故意通过它注册，会创建与外层 effect 平级的副作用。派生的
+`scope` 只在 body 返回前接受新注册，之后再用它注册会得到 `INACTIVE_EFFECT`（`Effect` / `On*` /
+`OnDispose` panic，返回 error 的 `Provide*` / `Serve` / `Load*` / `Inject` 则返回该错误）。这使同一
+fiber 上的并发注册不再依赖一个共享的“当前 body”标记：传 `scope` 就是嵌套，传原 `ctx` 就是平级。
+`scope.Context()` 与 `scope.Done()` 仍表示 **fiber 生命周期**；effect 级资源应由返回的 disposer
+或 `scope.OnDispose` 回收。与 `sync.Once` 一样，cleanup 之间不能形成 disposer 调用环；无论是
+调用自己、祖先 Effect，还是两个平级 cleanup 互相调用，这种回收环都会死锁。
 
 ### 4. Service 与 Inject — 依赖声明与 epoch
 
@@ -135,7 +154,9 @@ dispose()
 // 回到 pending；再提供新实现会重新加载
 ```
 
-`ctx.Serve` 是常用封装：注册服务，并在实例实现 `Start()` / `Stop()` 时自动调用。
+`ctx.Serve` 是常用封装：注册服务，并在实例实现 `Start()` / `Stop()` 时自动调用。通过 Effect
+body 的 `scope` 调用 `Provide*` / `Serve` 时，服务跟随该 effect 回收；通过插件原始 `ctx` 调用时
+则跟随 fiber 回收。
 
 服务族都是类型化方法：`ctx.Get[*DB]("db")`；`ctx.Provide("db", db)` 的类型参数从服务值推断，
 所以既有调用点不用改，只持有 `any` 的宿主直接写 `ctx.Provide("db", svcAny)`（T 推断为 `any`）。
@@ -166,7 +187,8 @@ registry := rootCtx.MustGet[cordis.Registry]("registry") // examples/hotplug 的
 ### 5. Event — 带作用域过滤的事件总线
 
 `ctx.On` / `ctx.OnOnce` / `ctx.OnValue` / `ctx.OnWaterfall` **注册**，`ctx.Emit` /
-`ctx.Bail` / `ctx.Serial` / `ctx.Parallel` / `ctx.Waterfall` **分发**。每个分发模式都有
+`ctx.Bail` / `ctx.Serial` / `ctx.Parallel` / `ctx.Waterfall` **分发**。监听器的生命周期由注册时使用的
+Context 决定：Effect body 传入的 `scope` 归该 effect，插件原始 `ctx` 归 fiber。每个分发模式都有
 `*Scoped` 变体（`EmitScoped` / `BailScoped` / `SerialScoped` / `ParallelScoped` /
 `WaterfallScoped`），只投递给同一隔离作用域内的监听者；`cordis.Global()` 可让监听者
 跨越作用域（对应 Cordis 的 `global` 选项）。
@@ -306,7 +328,7 @@ go run ./cmd/cordis dump base.json profile.json   # base.json / profile.json 是
 `examples/isolation` 演示默认、隔离与显式共享三种服务作用域。
 `examples/serviceprobe` 是服务容器的行为探针：自提供服务可见性、同名冲突、依赖方跟随 provider
 状态、`Set` 语义、可用性谓词与 `Serve` 生命周期钩子。
-`examples/walkthrough` 打印 effect 树的卸载顺序（LIFO）。
+`examples/walkthrough` 演示显式 effect scope 的父子树与卸载顺序（LIFO）。
 
 ## 开发
 
@@ -351,6 +373,9 @@ make ci      # CI 跑的东西：gofmt 检查 + go vet + staticcheck + revive + 
   `examples/` 不在统计里（六个示例由 `make examples` 在 CI 里逐个执行）；`cmd/cordis` 的退出码契约由它自己的进程内测试
   钉住（`--help` / 用法错误 / 加载失败三档）
 - 交叉编译验证：linux/amd64、windows/amd64、darwin/arm64
+- ⚠️ 破坏性变更：`ctx.Effect` 的 body 从 `func() Disposer` 改为
+  `func(scope *Context) Disposer`。嵌套副作用必须通过 `scope` 注册；继续使用外层 `ctx` 会明确注册为
+  平级副作用。body 返回后 `scope` 的注册能力失效，迁移方式见「Effect」
 - ⚠️ 破坏性变更：`Definition` 不再导出；`ctx.Load` / `ctx.LoadWithInject` 改为泛型方法
   `(plugin, config)`；类型化服务访问改为方法形态——`ctx.Get` / `ctx.MustGet` / `ctx.Provide` /
   `ctx.ProvideChecked` / `ctx.Serve`，无类型的 `ctx.Get(name)` 由 `ctx.Lookup(name)` 取代，
