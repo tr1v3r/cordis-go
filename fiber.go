@@ -446,6 +446,14 @@ func (f *Fiber) refresh() {
 
 // drive drains transition passes until no caller asked for another one.
 func (f *Fiber) drive() {
+	defer func() {
+		if reason := recover(); reason != nil {
+			f.mu.Lock()
+			f.busy = false
+			f.mu.Unlock()
+			panic(reason)
+		}
+	}()
 	for {
 		// Begin a pass: clear the rerun marker for this transition.
 		f.mu.Lock()
@@ -653,7 +661,7 @@ func (f *Fiber) load(bindings map[string]*serviceBinding, epoch string) {
 	raw := f.rawConfig
 	f.mu.Unlock()
 
-	config, err := f.runtime.definition.ResolveConfig(raw)
+	config, err := f.resolveConfig(raw)
 	if err != nil {
 		f.fail(err)
 		return
@@ -676,6 +684,15 @@ func (f *Fiber) load(bindings map[string]*serviceBinding, epoch string) {
 	f.err = nil
 	f.mu.Unlock()
 	f.setState(StateActive)
+}
+
+func (f *Fiber) resolveConfig(raw any) (config any, err error) {
+	defer func() {
+		if reason := recover(); reason != nil {
+			err = fmt.Errorf("panic resolving config for plugin %s: %v", f.Name(), reason)
+		}
+	}()
+	return f.runtime.definition.ResolveConfig(raw)
 }
 
 func (f *Fiber) run(config any) (err error) {
