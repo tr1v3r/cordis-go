@@ -2,6 +2,7 @@ package loader_test
 
 import (
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -154,6 +155,140 @@ func TestComposeInsertAddsEntries(t *testing.T) {
 	}
 	if node := tree.Find("b"); node == nil || node.Source != "extra" {
 		t.Fatalf("inserted entry missing or misattributed: %+v", node)
+	}
+}
+
+// TestComposeRejectsMixedInsertPerDeclaringField pins that every field of a
+// normal entry conflicts with "insert": the composer cannot honour both halves,
+// so no single field may sneak past the rejection.
+func TestComposeRejectsMixedInsertPerDeclaringField(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		entry     *loader.Patch
+		wantLabel string
+	}{
+		{
+			name:      "id",
+			entry:     &loader.Patch{ID: "a", Insert: []*loader.Patch{{ID: "x"}}},
+			wantLabel: "a",
+		},
+		{
+			name:      "name",
+			entry:     &loader.Patch{Name: strptr("db"), Insert: []*loader.Patch{{ID: "x"}}},
+			wantLabel: "db",
+		},
+		{
+			name:      "label",
+			entry:     &loader.Patch{Label: strptr("prod"), Insert: []*loader.Patch{{ID: "x"}}},
+			wantLabel: "<unnamed>",
+		},
+		{
+			name:      "disabled",
+			entry:     &loader.Patch{Disabled: boolptr(true), Insert: []*loader.Patch{{ID: "x"}}},
+			wantLabel: "<unnamed>",
+		},
+		{
+			name:      "group",
+			entry:     &loader.Patch{Group: boolptr(true), Insert: []*loader.Patch{{ID: "x"}}},
+			wantLabel: "<unnamed>",
+		},
+		{
+			name:      "inject",
+			entry:     &loader.Patch{Inject: &[]string{"db"}, Insert: []*loader.Patch{{ID: "x"}}},
+			wantLabel: "<unnamed>",
+		},
+		{
+			name: "config",
+			entry: &loader.Patch{Config: map[string]any{"path": "x"},
+				Insert: []*loader.Patch{{ID: "x"}}},
+			wantLabel: "<unnamed>",
+		},
+		{
+			name: "plugins",
+			entry: &loader.Patch{Plugins: []*loader.Patch{{ID: "child"}},
+				Insert: []*loader.Patch{{ID: "x"}}},
+			wantLabel: "<unnamed>",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			layer := loader.Layer{Label: "base", Entries: []*loader.Patch{tc.entry}}
+			_, err := loader.Compose([]loader.Layer{layer})
+			if err == nil {
+				t.Fatalf("want an error: field %s plus insert must be rejected", tc.name)
+			}
+			want := fmt.Sprintf("layer base: entry %q declares both insert and other fields; "+
+				"split it into two entries", tc.wantLabel)
+			if err.Error() != want {
+				t.Fatalf("want %q, got %q", want, err)
+			}
+		})
+	}
+}
+
+// TestComposeRejectsMixedInsertInsideInsertTarget covers the recursion into an
+// entry's "insert" list: an inserted entry is an entry too, so it must not
+// declare its own fields and insert at once either.
+func TestComposeRejectsMixedInsertInsideInsertTarget(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		patch bool
+		entry *loader.Patch
+	}{
+		{
+			name: "base",
+			entry: &loader.Patch{Insert: []*loader.Patch{{
+				ID: "b", Insert: []*loader.Patch{{ID: "c"}},
+			}}},
+		},
+		{
+			name:  "patch",
+			patch: true,
+			entry: &loader.Patch{Insert: []*loader.Patch{{
+				ID:     "b",
+				Config: map[string]any{"path": "x"},
+				Insert: []*loader.Patch{{ID: "c"}},
+			}}},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			layer := loader.Layer{
+				Label: "base", Patch: tc.patch, Entries: []*loader.Patch{tc.entry},
+			}
+			_, err := loader.Compose([]loader.Layer{layer})
+			if err == nil {
+				t.Fatal("want an error: an inserted entry cannot insert and declare fields too")
+			}
+			want := `layer base: entry "b" declares both insert and other fields;` +
+				` split it into two entries`
+			if err.Error() != want {
+				t.Fatalf("want %q, got %q", want, err)
+			}
+		})
+	}
+}
+
+// TestComposeRejectsMixedInsertInLaterLayer pins that validation covers every
+// layer in order: a mixed insert in a later layer fails the whole composition
+// and yields no tree, even though the earlier layers were valid on their own.
+func TestComposeRejectsMixedInsertInLaterLayer(t *testing.T) {
+	base := loader.Layer{Label: "base", Entries: []*loader.Patch{{ID: "a", Name: strptr("db")}}}
+	bad := loader.Layer{Label: "profile", Patch: true, Entries: []*loader.Patch{{
+		ID:     "a",
+		Label:  strptr("prod"),
+		Insert: []*loader.Patch{{ID: "b", Name: strptr("server")}},
+	}}}
+
+	tree, err := loader.Compose([]loader.Layer{base, bad})
+	if err == nil {
+		t.Fatal("want an error: a mixed insert in a later layer must fail the composition")
+	}
+	if tree != nil {
+		t.Fatalf("want no tree from a failed composition, got %d layers", len(tree.Layers))
+	}
+	want := `layer profile: entry "a" declares both insert and other fields;` +
+		` split it into two entries`
+	if err.Error() != want {
+		t.Fatalf("want %q, got %q", want, err)
 	}
 }
 
@@ -346,6 +481,149 @@ func TestTreeLoadFailsOnFailedEntry(t *testing.T) {
 	}
 }
 
+// TestTreeLoadDisposesTheFailedEntry pins all-or-nothing: the entry that failed
+// owns a fiber like any other, so the rollback has to dispose it too instead of
+// leaving its effect slot and its runtime behind.
+func TestTreeLoadDisposesTheFailedEntry(t *testing.T) {
+	registry := loader.NewRegistry()
+	loader.MustRegister(registry, "ok",
+		cordis.Define[struct{}]("ok", func(*cordis.Context, struct{}) error { return nil }))
+	loader.MustRegister(registry, "bad",
+		cordis.Define[struct{}]("bad", func(*cordis.Context, struct{}) error {
+			return errors.New("boom")
+		}))
+
+	layer := loader.Layer{Label: "base", Entries: []*loader.Patch{
+		{ID: "a", Name: strptr("ok")},
+		{ID: "b", Name: strptr("bad")},
+	}}
+	tree, err := loader.Compose([]loader.Layer{layer})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	root := cordis.New()
+	before := len(root.Effects())
+	if _, err := tree.Load(root, registry); err == nil {
+		t.Fatal("want an error")
+	}
+	if got := len(root.Effects()); got != before {
+		t.Fatalf("want effects back at %d after rollback, got %d", before, got)
+	}
+	reg, ok := cordis.Get[cordis.Registry](root, "registry")
+	if !ok {
+		t.Fatal("the registry service is missing")
+	}
+	if got := reg.Plugins(); len(got) != 0 {
+		t.Fatalf("want no plugin with live fibers after rollback, got %v", got)
+	}
+}
+
+// TestTreeLoadFailedEntryInsideGroupRollsBack pins all-or-nothing across the
+// group boundary: the failure happens outside the group while the group has
+// already loaded a fiber, so the rollback must reach through the recursion and
+// the error must name the entry that actually failed.
+func TestTreeLoadFailedEntryInsideGroupRollsBack(t *testing.T) {
+	boom := errors.New("boom")
+	registry := loader.NewRegistry()
+	var events []string
+	loader.MustRegister(registry, "ok",
+		cordis.Define[struct{}]("ok", func(ctx *cordis.Context, _ struct{}) error {
+			events = append(events, "load ok")
+			ctx.OnDispose(func() { events = append(events, "dispose ok") })
+			return nil
+		}))
+	loader.MustRegister(registry, "bad",
+		cordis.Define[struct{}]("bad", func(*cordis.Context, struct{}) error { return boom }))
+
+	layer := loader.Layer{Label: "base", Entries: []*loader.Patch{
+		{ID: "grp", Group: boolptr(true), Plugins: []*loader.Patch{
+			{ID: "inner", Name: strptr("ok")},
+		}},
+		{ID: "outer", Name: strptr("bad")},
+	}}
+	tree, err := loader.Compose([]loader.Layer{layer})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	root := cordis.New()
+	before := len(root.Effects())
+	_, err = tree.Load(root, registry)
+	if err == nil {
+		t.Fatal("want an error")
+	}
+	if !errors.Is(err, boom) {
+		t.Fatalf("want the plugin's own error, got %v", err)
+	}
+	if want := `entry "outer" (bad)`; !strings.Contains(err.Error(), want) {
+		t.Fatalf("want the error to name the failed entry %q, got %q", want, err)
+	}
+	if !reflect.DeepEqual(events, []string{"load ok", "dispose ok"}) {
+		t.Fatalf("want the group's fiber rolled back too, got %v", events)
+	}
+	if got := len(root.Effects()); got != before {
+		t.Fatalf("want effects back at %d after rollback, got %d", before, got)
+	}
+	reg, ok := cordis.Get[cordis.Registry](root, "registry")
+	if !ok {
+		t.Fatal("the registry service is missing")
+	}
+	if got := reg.Plugins(); len(got) != 0 {
+		t.Fatalf("want no plugin with live fibers after rollback, got %v", got)
+	}
+}
+
+// TestTreeLoadAfterFailureLeavesAUsableContext pins the recovery half of
+// all-or-nothing: a host that fixes the configuration and loads again on the
+// same context must not inherit leftovers from the failed attempt.
+func TestTreeLoadAfterFailureLeavesAUsableContext(t *testing.T) {
+	registry := loader.NewRegistry()
+	loader.MustRegister(registry, "ok",
+		cordis.Define[struct{}]("ok", func(*cordis.Context, struct{}) error { return nil }))
+	loader.MustRegister(registry, "bad",
+		cordis.Define[struct{}]("bad", func(*cordis.Context, struct{}) error {
+			return errors.New("boom")
+		}))
+
+	failing := loader.Layer{Label: "base", Entries: []*loader.Patch{
+		{ID: "a", Name: strptr("bad")},
+	}}
+	tree, err := loader.Compose([]loader.Layer{failing})
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := cordis.New()
+	if _, err := tree.Load(root, registry); err == nil {
+		t.Fatal("want an error")
+	}
+
+	fixed := loader.Layer{Label: "base", Entries: []*loader.Patch{
+		{ID: "a", Name: strptr("ok")},
+	}}
+	tree, err = loader.Compose([]loader.Layer{fixed})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fibers, err := tree.Load(root, registry)
+	if err != nil {
+		t.Fatalf("want the context usable after a failed load, got %v", err)
+	}
+	if len(fibers) != 1 {
+		t.Fatalf("want one fiber after the reload, got %d", len(fibers))
+	}
+	if fibers[0].State() != cordis.StateActive {
+		t.Fatalf("want the reloaded fiber active, got %s", fibers[0].State())
+	}
+	reg, ok := cordis.Get[cordis.Registry](root, "registry")
+	if !ok {
+		t.Fatal("the registry service is missing")
+	}
+	if got := reg.Plugins(); !reflect.DeepEqual(got, []string{"ok"}) {
+		t.Fatalf("want only the reloaded plugin live, got %v", got)
+	}
+}
+
 func TestGroupInjectGatesChildren(t *testing.T) {
 	registry := loader.NewRegistry()
 	loader.MustRegister(registry, "child",
@@ -441,6 +719,71 @@ func TestComposeNonGroupChildrenWarnAndStrictFails(t *testing.T) {
 	}
 }
 
+// TestComposeRejectsMixedInsert pins the loud rejection of an entry that
+// declares "insert" and something else at once. Such an entry loses one half of
+// what it says - the base path drops the entry itself, the patch path drops the
+// patch and its warnings - so it has to be a configuration error instead.
+func TestComposeRejectsMixedInsert(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		patch bool
+		entry *loader.Patch
+		want  string
+	}{
+		{
+			name: "base entry",
+			entry: &loader.Patch{ID: "a", Name: strptr("db"),
+				Insert: []*loader.Patch{{ID: "b", Name: strptr("db")}}},
+			want: `layer base: entry "a" declares both insert and other fields;` +
+				` split it into two entries`,
+		},
+		{
+			name:  "patch entry",
+			patch: true,
+			entry: &loader.Patch{ID: "a", Config: map[string]any{"path": "x"},
+				Insert: []*loader.Patch{{ID: "b", Name: strptr("db")}}},
+			want: `layer p: entry "a" declares both insert and other fields;` +
+				` split it into two entries`,
+		},
+		{
+			name:  "unnamed entry",
+			entry: &loader.Patch{Name: strptr(""), Insert: []*loader.Patch{{ID: "b"}}},
+			want: `layer base: entry "<unnamed>" declares both insert and other fields;` +
+				` split it into two entries`,
+		},
+		{
+			name: "insert with inject",
+			entry: &loader.Patch{Inject: &[]string{"db"},
+				Insert: []*loader.Patch{{ID: "b", Name: strptr("db")}}},
+			want: `layer base: entry "<unnamed>" declares both insert and other fields;` +
+				` split it into two entries`,
+		},
+		{
+			name: "nested entry",
+			entry: &loader.Patch{ID: "grp", Group: boolptr(true), Plugins: []*loader.Patch{
+				{ID: "b", Insert: []*loader.Patch{{ID: "c"}}},
+			}},
+			want: `layer base: entry "b" declares both insert and other fields;` +
+				` split it into two entries`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			label := "base"
+			if tc.patch {
+				label = "p"
+			}
+			layer := loader.Layer{Label: label, Patch: tc.patch, Entries: []*loader.Patch{tc.entry}}
+			_, err := loader.Compose([]loader.Layer{layer})
+			if err == nil {
+				t.Fatal("want an error: an entry cannot insert and declare fields at once")
+			}
+			if err.Error() != tc.want {
+				t.Fatalf("want %q, got %q", tc.want, err)
+			}
+		})
+	}
+}
+
 // TestTreeLoadRejectsNonGroupChildren pins the loud half: loading a tree whose
 // entry has children without being a group must fail instead of loading the
 // parent and dropping the children.
@@ -463,5 +806,30 @@ func TestTreeLoadRejectsNonGroupChildren(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "group: true") {
 		t.Fatalf("want the error to point at group: true, got %q", err)
+	}
+}
+
+// TestComposeKeepsPureInsert is the regression guard for the rejection above:
+// an entry carrying nothing but "insert" keeps creating entries, in base layers
+// as well as in patch layers.
+func TestComposeKeepsPureInsert(t *testing.T) {
+	base := loader.Layer{Label: "base", Entries: []*loader.Patch{{
+		Insert: []*loader.Patch{{ID: "a", Name: strptr("db")}},
+	}}}
+	patch := loader.Layer{Label: "p", Patch: true, Entries: []*loader.Patch{{
+		Insert: []*loader.Patch{{ID: "b", Name: strptr("db")}},
+	}}}
+
+	tree, err := loader.Compose([]loader.Layer{base, patch})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tree.Size() != 2 {
+		t.Fatalf("want 2 inserted entries, got %d", tree.Size())
+	}
+	for _, id := range []string{"a", "b"} {
+		if tree.Find(id) == nil {
+			t.Fatalf("want inserted entry %q to exist", id)
+		}
 	}
 }
