@@ -515,21 +515,19 @@ func (f *Fiber) applyUnload() {
 	f.unload()
 }
 
-// applyLoad commits the resolved epoch and runs the plugin body on a clean
-// fiber.
+// applyLoad runs the plugin body for a resolved generation on a clean fiber.
 func (f *Fiber) applyLoad(bindings map[string]*serviceBinding, epoch string) {
 	f.mu.Lock()
 	if f.disposed {
 		f.mu.Unlock()
 		return
 	}
-	f.epoch = epoch
 	f.mu.Unlock()
-	f.load(bindings)
+	f.load(bindings, epoch)
 }
 
-// reload forces an unload/reload cycle for Restart and Update. It resets the
-// recorded epoch so the next load runs even when dependencies are unchanged.
+// reload forces an unload/reload cycle for Restart and Update. It forgets the
+// recorded generation so the new one loads even when dependencies are unchanged.
 func (f *Fiber) reload() {
 	f.unload()
 
@@ -546,18 +544,13 @@ func (f *Fiber) reload() {
 	// Resolve after the old generation is gone: unload may have changed the
 	// service registry, so pre-unload bindings can already be stale.
 	bindings, epoch := f.resolveInjections()
-
-	f.mu.Lock()
-	if f.disposed || epoch == epochInactive {
-		f.mu.Unlock()
+	if epoch == epochInactive {
 		return
 	}
-	f.epoch = epoch
-	f.mu.Unlock()
 
 	// reload unloaded the previous generation at entry, so the fiber is clean
 	// here. load re-checks disposed before it starts the new body.
-	f.load(bindings)
+	f.load(bindings, epoch)
 }
 
 // resolveInjections resolves every injected service and encodes the provider
@@ -583,7 +576,7 @@ func (f *Fiber) resolveInjections() (map[string]*serviceBinding, string) {
 //
 // The caller is the refresh owner. load still re-checks disposed and provider
 // liveness because callbacks and concurrent disposal can invalidate the decision.
-func (f *Fiber) load(bindings map[string]*serviceBinding) {
+func (f *Fiber) load(bindings map[string]*serviceBinding, epoch string) {
 	f.mu.Lock()
 	if f.disposed {
 		f.mu.Unlock()
@@ -601,12 +594,23 @@ func (f *Fiber) load(bindings map[string]*serviceBinding) {
 		if binding.live() {
 			continue
 		}
-		// Record the rerun; drive re-resolves on the next pass.
+		// Nothing of this generation started, so give the claim back: record the
+		// inactive epoch and return to pending. Without that the rerun pass would
+		// compare the re-resolved epoch against a committed one, match, and leave
+		// the fiber loading forever with no body and no effects.
+		f.mu.Lock()
+		f.live = false
+		f.epoch = epochInactive
+		f.mu.Unlock()
+		f.setState(StatePending)
 		f.refresh()
 		return
 	}
 
+	// The epoch is committed only now, together with the snapshot it describes:
+	// a generation that never ran its body must not look like the loaded one.
 	f.mu.Lock()
+	f.epoch = epoch
 	f.resolvedServices = bindings
 	raw := f.rawConfig
 	f.mu.Unlock()
