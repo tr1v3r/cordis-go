@@ -476,6 +476,15 @@ func (f *Fiber) load(resolved map[string]*serviceBinding) {
 	if !f.setState(StateLoading) {
 		return
 	}
+	for _, binding := range resolved {
+		if binding.live() {
+			continue
+		}
+		// A provider vanished while the load was being prepared. Ask the
+		// refresh owner to re-evaluate before running the plugin body.
+		f.refresh()
+		return
+	}
 
 	f.mu.Lock()
 	f.resolvedServices = resolved

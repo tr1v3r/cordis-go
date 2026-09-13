@@ -168,6 +168,11 @@ func (b *serviceBinding) available() bool {
 	return b.availabilityCheck == nil || runCheck(b.availabilityCheck)
 }
 
+// live reports whether the binding still resolves to an active provider.
+func (b *serviceBinding) live() bool {
+	return b.provider != nil && b.provider.State() == StateActive && b.available()
+}
+
 func runCheck(check func() bool) (ok bool) {
 	defer func() {
 		if recover() != nil {
