@@ -713,10 +713,17 @@ func (f *Fiber) notifyProvided() {
 // is already running, the effect teardown is deferred to that loop. Use Disposed
 // to wait for the deferred teardown.
 func (f *Fiber) Dispose() {
-	busy, already := f.claimDispose()
-	if already {
+	f.mu.Lock()
+	if f.disposed {
+		f.mu.Unlock()
 		return
 	}
+	f.disposed = true
+	// Mark a rerun before the cancel/remove/emit steps so a running owner can
+	// start teardown without waiting for them. refresh clears the marker on the
+	// first pass when no owner is running.
+	f.dirty = true
+	f.mu.Unlock()
 
 	// Stop dependent goroutines immediately, then unwind effects.
 	f.cancel()
@@ -727,10 +734,6 @@ func (f *Fiber) Dispose() {
 		f.shared().bus.emitInternal("internal/plugin", &PluginEvent{Fiber: f})
 	}
 
-	if busy {
-		// claimDispose marked the running transition for another pass.
-		return
-	}
 	if f.root {
 		f.unload()
 		return

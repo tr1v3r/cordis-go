@@ -49,24 +49,6 @@ func (f *Fiber) beginTransition() bool {
 	return true
 }
 
-// claimDispose marks the fiber disposed. It reports whether a transition owner
-// is running and whether another caller already claimed the disposal. The
-// dirty flag is set in the same critical section so a running owner cannot
-// clear busy and exit before seeing the request.
-func (f *Fiber) claimDispose() (busy, already bool) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.disposed {
-		return false, true
-	}
-	f.disposed = true
-	if f.busy {
-		f.dirty = true
-		return true, false
-	}
-	return false, false
-}
-
 // takeRequest consumes pending transition requests under the fiber lock. It
 // reports whether the fiber is disposed and whether a forced reload is pending.
 func (f *Fiber) takeRequest() (disposed, forceReload bool) {
