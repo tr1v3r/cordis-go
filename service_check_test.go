@@ -56,3 +56,62 @@ func TestAvailabilityCheckPanicIsLogged(t *testing.T) {
 		t.Fatalf("want an availability check panic report, got %q", lines[0])
 	}
 }
+
+// TestAvailabilityCheckPanicReportedOncePerBinding pins that the report latch
+// lives on the binding, not on the service name: two isolated scopes can bind
+// the same name, and each of their broken probes reports its own panic once
+// while repeated lookups stay quiet.
+func TestAvailabilityCheckPanicReportedOncePerBinding(t *testing.T) {
+	recorder := &checkPanicLogRecorder{}
+	root := cordis.New(cordis.WithWriter(recorder))
+	left := root.Isolate("db")
+	right := root.Isolate("db")
+	for _, scoped := range []*cordis.Context{left, right} {
+		if _, err := scoped.ProvideChecked("db", &fakeDB{name: "broken"},
+			func() bool { panic("probe exploded") }); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	for _, scoped := range []*cordis.Context{left, right} {
+		if _, ok := scoped.Get[*fakeDB]("db"); ok {
+			t.Fatal("a panicking availability check must leave the service unavailable")
+		}
+	}
+	if got := recorder.snapshot(); len(got) != 2 {
+		t.Fatalf("want one report per binding, got %d: %q", len(got), got)
+	}
+
+	for _, scoped := range []*cordis.Context{left, right} {
+		if _, ok := scoped.Get[*fakeDB]("db"); ok {
+			t.Fatal("a panicking availability check must leave the service unavailable")
+		}
+	}
+	if got := recorder.snapshot(); len(got) != 2 {
+		t.Fatalf("want no report from repeated lookups, got %d: %q", len(got), got)
+	}
+}
+
+// TestAvailabilityCheckWithoutPanicStaysSilent pins that the new reporting
+// path only reacts to panics: a probe returning false hides the service, a
+// probe returning true releases it, and neither writes a log line.
+func TestAvailabilityCheckWithoutPanicStaysSilent(t *testing.T) {
+	recorder := &checkPanicLogRecorder{}
+	root := cordis.New(cordis.WithWriter(recorder))
+	ready := false
+	if _, err := root.ProvideChecked("db", &fakeDB{name: "late"},
+		func() bool { return ready }); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, ok := root.Get[*fakeDB]("db"); ok {
+		t.Fatal("unavailable service must not resolve")
+	}
+	ready = true
+	if _, ok := root.Get[*fakeDB]("db"); !ok {
+		t.Fatal("service must resolve once available")
+	}
+	if got := recorder.snapshot(); len(got) != 0 {
+		t.Fatalf("want a non-panicking check to stay silent, got %d: %q", len(got), got)
+	}
+}
