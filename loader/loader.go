@@ -297,10 +297,10 @@ func (c *treeComposer) applyBase(source string, targetNodes *[]*Node, entry *Pat
 		if baseEntry == nil {
 			continue
 		}
-		if baseEntry.ID == "" && baseEntry.Name == nil {
-			return fmt.Errorf("layer %s: entry requires id or name", source)
+		node, err := createNode(baseEntry, source, "entry")
+		if err != nil {
+			return err
 		}
-		node := createNode(baseEntry, source)
 		*targetNodes = append(*targetNodes, node)
 		// Duplicates are reported by indexNode, which sees nested children too.
 		// Keeping one path for every creation site also keeps the outcome
@@ -321,9 +321,6 @@ func (c *treeComposer) applyPatch(source string, targetNodes *[]*Node, patch *Pa
 			if insertedEntry == nil {
 				continue
 			}
-			if insertedEntry.ID == "" && insertedEntry.Name == nil {
-				return fmt.Errorf("layer %s: inserted entry requires id or name", source)
-			}
 			if insertedEntry.ID != "" {
 				if _, exists := c.index[insertedEntry.ID]; exists {
 					message := fmt.Sprintf("layer %s: duplicate entry id %q",
@@ -335,7 +332,10 @@ func (c *treeComposer) applyPatch(source string, targetNodes *[]*Node, patch *Pa
 					continue
 				}
 			}
-			node := createNode(insertedEntry, source)
+			node, err := createNode(insertedEntry, source, "inserted entry")
+			if err != nil {
+				return err
+			}
 			*targetNodes = append(*targetNodes, node)
 			if err := c.indexNode(node); err != nil {
 				return err
@@ -364,33 +364,67 @@ func (c *treeComposer) applyPatch(source string, targetNodes *[]*Node, patch *Pa
 	return nil
 }
 
-func createNode(patch *Patch, source string) *Node {
-	node := &Node{ID: patch.ID, Source: source}
-	if patch.Name != nil {
-		node.Name = *patch.Name
+// createNode builds one node from an entry. where locates the entry inside its
+// layer - "entry", "inserted entry", "entry plugins[1] insert[0]" - so an
+// unusable nested entry can be reported instead of turning into an anonymous
+// node that no id addresses and no plugin name resolves.
+func createNode(entry *Patch, source, where string) (*Node, error) {
+	if entry.ID == "" && !namesEntry(entry) {
+		return nil, fmt.Errorf("layer %s: %s requires id or name", source, where)
 	}
-	if patch.Label != nil {
-		node.Label = *patch.Label
+	node := &Node{ID: entry.ID, Source: source}
+	if entry.Name != nil {
+		node.Name = *entry.Name
 	}
-	if patch.Disabled != nil {
-		node.Disabled = *patch.Disabled
+	if entry.Label != nil {
+		node.Label = *entry.Label
 	}
-	if patch.Group != nil {
-		node.Group = *patch.Group
+	if entry.Disabled != nil {
+		node.Disabled = *entry.Disabled
 	}
-	if patch.Inject != nil {
-		node.Inject = append([]string(nil), (*patch.Inject)...)
+	if entry.Group != nil {
+		node.Group = *entry.Group
 	}
-	if patch.Config != nil {
-		node.Config = cloneMap(patch.Config)
+	if entry.Inject != nil {
+		node.Inject = append([]string(nil), (*entry.Inject)...)
 	}
-	for _, child := range patch.Plugins {
+	if entry.Config != nil {
+		node.Config = cloneMap(entry.Config)
+	}
+	for i, child := range entry.Plugins {
 		if child == nil {
 			continue
 		}
-		node.Children = append(node.Children, createNode(child, source))
+		childWhere := fmt.Sprintf("%s plugins[%d]", where, i)
+		if len(child.Insert) > 0 {
+			// A nested entry may insert instead of naming a plugin: it expands
+			// into sibling children, exactly as applyPatch expands it in a
+			// patch layer, so a base layer and a patch layer read the same.
+			for j, inserted := range child.Insert {
+				if inserted == nil {
+					continue
+				}
+				insertedNode, err := createNode(inserted, source,
+					fmt.Sprintf("%s insert[%d]", childWhere, j))
+				if err != nil {
+					return nil, err
+				}
+				node.Children = append(node.Children, insertedNode)
+			}
+			continue
+		}
+		childNode, err := createNode(child, source, childWhere)
+		if err != nil {
+			return nil, err
+		}
+		node.Children = append(node.Children, childNode)
 	}
-	return node
+	return node, nil
+}
+
+// namesEntry reports whether an entry carries a usable name.
+func namesEntry(entry *Patch) bool {
+	return entry.Name != nil && *entry.Name != ""
 }
 
 func mergePatch(node *Node, patch *Patch, source string) {
