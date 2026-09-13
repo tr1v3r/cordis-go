@@ -190,13 +190,18 @@ func (f *Fiber) start() error {
 	}
 	f.mu.Lock()
 	if f.disposed {
+		// The parent unloaded while this fiber was attaching, so Dispose
+		// already released everything the fiber owns. It never takes a slot in
+		// its runtime: a fiber attached after its own disposal could not be
+		// removed again.
 		f.mu.Unlock()
 		parentEffectDisposer()
-	} else {
-		f.parentEffectDisposer = parentEffectDisposer
-		f.mu.Unlock()
+		f.shared().discardRuntime(f.runtime)
+		return nil
 	}
-	f.shared().addFiber(f.runtime, f)
+	f.parentEffectDisposer = parentEffectDisposer
+	f.mu.Unlock()
+	f.shared().attachFiber(f.runtime, f)
 	f.shared().bus.emitInternal("internal/plugin", &PluginEvent{Fiber: f})
 	f.refresh()
 	return nil
@@ -838,10 +843,13 @@ func (c *core) nextUID() int {
 	return c.counter
 }
 
-func (c *core) addFiber(runtime *runtime, fiber *Fiber) {
+// attachFiber publishes a fiber under its runtime and gives back the claim its
+// load took on it.
+func (c *core) attachFiber(runtime *runtime, fiber *Fiber) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	runtime.fibers = append(runtime.fibers, fiber)
+	runtime.claims--
 }
 
 func (c *core) removeFiber(runtime *runtime, fiber *Fiber) {
@@ -853,7 +861,7 @@ func (c *core) removeFiber(runtime *runtime, fiber *Fiber) {
 			break
 		}
 	}
-	if len(runtime.fibers) == 0 {
+	if runtime.claims == 0 && len(runtime.fibers) == 0 {
 		delete(c.runtimes, runtime.definition)
 	}
 }
