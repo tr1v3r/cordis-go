@@ -1,6 +1,7 @@
 package cordis_test
 
 import (
+	"fmt"
 	"strconv"
 	"sync"
 	"testing"
@@ -55,4 +56,90 @@ func TestConcurrentProvideOnOneFiberReleasesTheName(t *testing.T) {
 		}(index, scope)
 	}
 	wg.Wait()
+}
+
+// TestScopedProvideDisposeRacingOwnerTeardownReleasesName covers the other half
+// of the contract: registrations that belong to an effect scope while that effect
+// is being torn down. Each worker owns an isolated scope under the effect, so the
+// name it resolves can only ever be its own - with one shared scope and one name,
+// a lookup after Dispose could legitimately observe a sibling's live registration
+// and report a violation that never happened.
+//
+// The owner's unwind is allowed to run a child's disposer in its own goroutine;
+// the child's Dispose must still not return before the name is released.
+func TestScopedProvideDisposeRacingOwnerTeardownReleasesName(t *testing.T) {
+	const (
+		rounds  = 200
+		workers = 8
+	)
+	for round := range rounds {
+		root := cordis.New()
+		scopeReady := make(chan *cordis.Context, 1)
+		teardown := make(chan struct{})
+		outerReady := make(chan cordis.Disposer, 1)
+		go func() {
+			outerReady <- root.Effect("outer", func(scope *cordis.Context) cordis.Disposer {
+				scopeReady <- scope
+				<-teardown
+				return nil
+			})
+		}()
+		effectScope := <-scopeReady
+
+		scopes := make([]*cordis.Context, workers)
+		for index := range scopes {
+			scopes[index] = effectScope.IsolateShared("benchmark", "w"+strconv.Itoa(index))
+		}
+
+		var (
+			hot      sync.WaitGroup
+			done     sync.WaitGroup
+			failures = make(chan string, workers)
+		)
+		hot.Add(workers)
+		for index, scope := range scopes {
+			done.Add(1)
+			go func(worker int, scope *cordis.Context) {
+				defer done.Done()
+				first := true
+				for {
+					dispose, err := scope.Provide("benchmark", &fakeDB{name: "scoped"})
+					if err != nil {
+						// The scope expired; the registrations that did succeed
+						// above are the ones this test judges.
+						if first {
+							hot.Done()
+						}
+						return
+					}
+					dispose()
+					if _, ok := scope.Lookup("benchmark"); ok {
+						select {
+						case failures <- fmt.Sprintf(
+							"worker %d: dispose returned but the service is still registered",
+							worker):
+						default:
+						}
+						return
+					}
+					if first {
+						first = false
+						hot.Done()
+					}
+				}
+			}(index, scope)
+		}
+		hot.Wait()
+		close(teardown)
+		done.Wait()
+		outer := <-outerReady
+		outer()
+		root.Fiber().Dispose()
+
+		select {
+		case message := <-failures:
+			t.Fatalf("round %d: %s", round, message)
+		default:
+		}
+	}
 }
