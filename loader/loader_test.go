@@ -235,6 +235,154 @@ func TestComposePatchesNestedEntryByID(t *testing.T) {
 	}
 }
 
+// TestComposeBaseNestedInsertMatchesPatchLayer pins layer parity: the same
+// nested-insert shape must create the same entry whether it arrives in a base
+// layer or in a patch layer, since the two used to disagree.
+func TestComposeBaseNestedInsertMatchesPatchLayer(t *testing.T) {
+	fromBase := loader.Layer{Label: "base", Entries: []*loader.Patch{{
+		ID: "grp", Group: boolptr(true), Plugins: []*loader.Patch{
+			{Insert: []*loader.Patch{{ID: "c", Name: strptr("db")}}},
+		},
+	}}}
+	baseTree, err := loader.Compose([]loader.Layer{fromBase})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	fromPatch := []loader.Layer{
+		{Label: "base", Entries: []*loader.Patch{{ID: "grp", Group: boolptr(true)}}},
+		{Label: "extra", Patch: true, Entries: []*loader.Patch{{
+			ID: "grp", Plugins: []*loader.Patch{
+				{Insert: []*loader.Patch{{ID: "c", Name: strptr("db")}}},
+			},
+		}}},
+	}
+	patchTree, err := loader.Compose(fromPatch)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		name string
+		tree *loader.Tree
+	}{
+		{"base", baseTree},
+		{"patch", patchTree},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			node := tc.tree.Find("c")
+			if node == nil {
+				t.Fatal("want the nested insert to create the entry it declares")
+			}
+			if node.Name != "db" {
+				t.Fatalf("want name %q, got %q", "db", node.Name)
+			}
+		})
+	}
+	if baseTree.Size() != patchTree.Size() {
+		t.Fatalf("want equal tree sizes, base %d vs patch %d",
+			baseTree.Size(), patchTree.Size())
+	}
+}
+
+// TestComposeBaseNestedInsertIsPatchable pins the point of the expansion: an
+// entry created by a nested insert in a base layer carries its declared id, so
+// a later layer can patch it like any other entry - impossible for the ghost
+// node the old code created.
+func TestComposeBaseNestedInsertIsPatchable(t *testing.T) {
+	base := loader.Layer{Label: "base", Entries: []*loader.Patch{{
+		ID: "grp", Group: boolptr(true), Plugins: []*loader.Patch{
+			{Insert: []*loader.Patch{{ID: "c", Name: strptr("db"),
+				Config: map[string]any{"path": "a.db"}}}},
+		},
+	}}}
+	profile := loader.Layer{Label: "profile", Patch: true, Entries: []*loader.Patch{{
+		ID:     "c",
+		Config: map[string]any{"path": "b.db"},
+	}}}
+
+	tree, err := loader.Compose([]loader.Layer{base, profile})
+	if err != nil {
+		t.Fatal(err)
+	}
+	node := tree.Find("c")
+	if node == nil {
+		t.Fatal("want the inserted entry to be addressable by id")
+	}
+	if node.Config["path"] != "b.db" {
+		t.Fatalf("want the later patch to replace the config, got %v", node.Config)
+	}
+	if !reflect.DeepEqual(node.Patched, []string{"profile"}) {
+		t.Fatalf("want patched-by [profile], got %v", node.Patched)
+	}
+}
+
+// TestComposeBaseNestedInsertExpandsAllTargets pins that one nested child may
+// insert several entries, and that they become siblings next to the named
+// children, in declaration order.
+func TestComposeBaseNestedInsertExpandsAllTargets(t *testing.T) {
+	layer := loader.Layer{Label: "base", Entries: []*loader.Patch{{
+		ID: "grp", Group: boolptr(true), Plugins: []*loader.Patch{
+			{ID: "n", Name: strptr("db")},
+			{Insert: []*loader.Patch{
+				{ID: "c1", Name: strptr("db")},
+				{ID: "c2", Name: strptr("server")},
+			}},
+		},
+	}}}
+
+	tree, err := loader.Compose([]loader.Layer{layer})
+	if err != nil {
+		t.Fatal(err)
+	}
+	grp := tree.Find("grp")
+	if grp == nil {
+		t.Fatal("want the group to exist")
+	}
+	var got []string
+	for _, child := range grp.Children {
+		got = append(got, child.ID)
+	}
+	want := []string{"n", "c1", "c2"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("want children %v, got %v", want, got)
+	}
+	if tree.Size() != 4 {
+		t.Fatalf("want 4 entries, got %d", tree.Size())
+	}
+}
+
+// TestComposeBaseNestedInsertExpandsRecursively pins that the expansion applies
+// at any depth: an inserted entry's own children may insert too, and those
+// entries must be created as well instead of turning into anonymous nodes.
+func TestComposeBaseNestedInsertExpandsRecursively(t *testing.T) {
+	layer := loader.Layer{Label: "base", Entries: []*loader.Patch{{
+		ID: "grp", Group: boolptr(true), Plugins: []*loader.Patch{
+			{Insert: []*loader.Patch{{
+				ID: "mid", Name: strptr("db"), Group: boolptr(true),
+				Plugins: []*loader.Patch{
+					{Insert: []*loader.Patch{{ID: "leaf", Name: strptr("db")}}},
+				},
+			}}},
+		},
+	}}}
+
+	tree, err := loader.Compose([]loader.Layer{layer})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tree.Find("leaf") == nil {
+		t.Fatal("want the insert inside the inserted entry to expand too")
+	}
+	mid := tree.Find("mid")
+	if mid == nil || len(mid.Children) != 1 || mid.Children[0].ID != "leaf" {
+		t.Fatalf("want leaf as the only child of mid, got %+v", mid)
+	}
+	if tree.Size() != 3 {
+		t.Fatalf("want 3 entries, got %d", tree.Size())
+	}
+}
+
 func TestTreeLoadRollsBackOnError(t *testing.T) {
 	registry := loader.NewRegistry()
 	var events []string
