@@ -64,8 +64,10 @@ func (s *loggerService) logf(level Level, name, format string, args ...any) {
 	}
 	line := fmt.Sprintf("%s [%s] %s: %s\n", time.Now().Format("15:04:05.000"), level, name, message)
 
-	// Writes are serialized separately so a writer that logs re-entrantly
-	// cannot deadlock against the level/config lock.
+	// Writes take their own lock so a slow or blocking writer never holds the
+	// level/config lock. This is not re-entrancy protection: a writer that logs
+	// through this same logger blocks on wmu and deadlocks, so a custom writer
+	// must not call back into the logger it serves.
 	s.wmu.Lock()
 	defer s.wmu.Unlock()
 	fmt.Fprint(writer, line)

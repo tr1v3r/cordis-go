@@ -217,7 +217,14 @@ func (c *Context) Set(name string, service any) error {
 }
 
 // Lookup reads a service without a type assertion. The second result is false
-// when the service is unregistered or its provider is not active.
+// when the service is unavailable to this context: it is not registered in the
+// context's isolation scope, its availability predicate currently fails, or its
+// provider is inactive and it is only reachable through the live registry.
+//
+// A binding pinned in the caller's dependency snapshot behaves differently: a
+// service this fiber injected, or one it provides itself, stays readable while
+// that fiber's generation runs, even when its provider is still loading or
+// already unloading. The fiber re-resolves once its own transition settles.
 func (c *Context) Lookup(name string) (any, bool) {
 	binding := c.resolveService(name)
 	if binding == nil {
@@ -230,6 +237,11 @@ func (c *Context) Lookup(name string) (any, bool) {
 // dependency snapshot upwards until the isolation scope changes, then fall back
 // to the live service registry. The snapshot makes a service visible to its own
 // provider and pins a dependent to the provider it loaded against.
+//
+// Unlike the live registry, the snapshot re-checks only the availability
+// predicate, never provider activity: it pins the binding for the life of the
+// generation, and the provider's own state transition is what re-resolves the
+// dependent.
 func (c *Context) resolveService(name string) *serviceBinding {
 	scopeLabel := c.isolateLabel(name)
 	for fiber := c.fiber; fiber != nil; {
@@ -254,9 +266,9 @@ func (c *Context) resolveService(name string) *serviceBinding {
 	return c.shared.lookupService(scopeLabel)
 }
 
-// Get reads a service with a type assertion. It reports false when the service
-// is missing, its provider is inactive, or the service has another type. A host
-// that only holds the service name at runtime reads it with Lookup instead.
+// Get reads a service with a type assertion. It reports false under the same
+// conditions as Lookup, or when the service has another type. A host that only
+// holds the service name at runtime reads it with Lookup instead.
 func (c *Context) Get[T any](name string) (T, bool) {
 	var zero T
 	binding := c.resolveService(name)
