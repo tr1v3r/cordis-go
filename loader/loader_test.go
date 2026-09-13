@@ -307,6 +307,54 @@ func TestGroupInjectGatesChildren(t *testing.T) {
 	}
 }
 
+// TestComposeBaseDuplicateIDKeepsFirst pins the policy for the case the old
+// applyBase check policed: a base layer repeating a top-level id used to fail
+// composition outright, while the same document reordered composed silently.
+// Both orders now warn and keep the first entry, and Strict() stays loud.
+func TestComposeBaseDuplicateIDKeepsFirst(t *testing.T) {
+	base := loader.Layer{Label: "base", Entries: []*loader.Patch{
+		{ID: "x", Name: strptr("db"), Label: strptr("first"),
+			Config: map[string]any{"path": "first.db"}},
+		{ID: "x", Name: strptr("db"), Label: strptr("second"),
+			Config: map[string]any{"path": "second.db"}},
+	}}
+	patch := loader.Layer{Label: "p", Patch: true, Entries: []*loader.Patch{{
+		ID: "x", Config: map[string]any{"path": "patched.db"},
+	}}}
+
+	tree, err := loader.Compose([]loader.Layer{base, patch})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `layer base: duplicate entry id "x"`
+	if len(tree.Warnings) != 1 || tree.Warnings[0] != want {
+		t.Fatalf("want exactly one warning %q, got %v", want, tree.Warnings)
+	}
+	node := tree.Find("x")
+	if node == nil {
+		t.Fatal("the entry that kept the id must stay addressable")
+	}
+	if node.Label != "first" {
+		t.Fatalf("want the first entry to keep the id, got label %q", node.Label)
+	}
+	if node.Config["path"] != "patched.db" {
+		t.Fatalf("want the patch to reach the node Find returns, got %v", node.Config)
+	}
+	shadow := shadowNode(tree, node)
+	if shadow == nil {
+		t.Fatal("want both entries in the tree, got only one")
+	}
+	if shadow.Config["path"] != "second.db" {
+		t.Fatalf("want the shadowed entry untouched at second.db, got %v", shadow.Config)
+	}
+	if tree.Size() != 2 {
+		t.Fatalf("want both entries counted, got %d nodes", tree.Size())
+	}
+	if _, err := loader.Compose([]loader.Layer{base, patch}, loader.Strict()); err == nil {
+		t.Fatal("strict composition must reject a duplicate id")
+	}
+}
+
 func TestPatchInsertRejectsDuplicateID(t *testing.T) {
 	base := loader.Layer{Label: "base", Entries: []*loader.Patch{{ID: "a", Name: strptr("db")}}}
 	patch := loader.Layer{Label: "p", Patch: true, Entries: []*loader.Patch{{
