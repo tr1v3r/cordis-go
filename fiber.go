@@ -514,12 +514,8 @@ func (f *Fiber) reload() {
 	f.err = nil
 	f.mu.Unlock()
 
-	f.reconcile()
-}
-
-// reconcile resolves the current dependency epoch and drives the load/unload
-// tail shared by sync and reload.
-func (f *Fiber) reconcile() {
+	// Resolve after the old generation is gone: unload may have changed the
+	// service registry, so pre-unload bindings can already be stale.
 	bindings, epoch := f.resolveInjections()
 
 	f.mu.Lock()
@@ -535,6 +531,9 @@ func (f *Fiber) reconcile() {
 		f.unload()
 		return
 	}
+
+	// reload unloaded above, so this is a defensive re-check before loading a
+	// new generation over live effects.
 	if hasEffects {
 		f.unload()
 
@@ -546,6 +545,7 @@ func (f *Fiber) reconcile() {
 			return
 		}
 	}
+
 	f.load(bindings)
 }
 
