@@ -181,9 +181,11 @@ func (f *Fiber) start() error {
 	parent := f.Parent
 
 	// The parent owns the child lifetime: disposing the parent disposes every
-	// plugin loaded beneath it. Use tryEffect so a parent that starts unloading
-	// during Load returns an error instead of panicking out of the constructor.
-	parentEffectDisposer, err := parent.fiber.tryEffect("child",
+	// plugin loaded beneath it. Registering it as a fiber-level effect keeps
+	// concurrent loads of one plugin from adopting each other's lifetime entry;
+	// tryFiberEffect still reports an unloading parent as an error, so Load
+	// fails instead of panicking out of the constructor.
+	parentEffectDisposer, err := parent.fiber.tryFiberEffect("child",
 		func() Disposer { return f.Dispose })
 	if err != nil {
 		return err
@@ -309,6 +311,26 @@ func (f *Fiber) effect(label string, body func() Disposer) Disposer {
 // level). Concurrent registrations therefore cannot attach an effect to an
 // entry that will never unwind it.
 func (f *Fiber) tryEffect(label string, body func() Disposer) (Disposer, error) {
+	return f.tryScopedEffect(label, body, true)
+}
+
+// tryFiberEffect registers an effect that belongs to the fiber itself. It takes
+// no part in effect nesting: it never becomes a scope for later registrations,
+// and it is never adopted by the scope that happens to be running.
+//
+// The child lifetime a load takes on its parent is registered this way. Loads
+// run on their own goroutines while f.current is per fiber, so a nesting
+// registration would let two concurrent loads of the same plugin adopt each
+// other's lifetime entry - disposing either fiber would then unwind the other
+// with it, through no fault of its own.
+func (f *Fiber) tryFiberEffect(label string, body func() Disposer) (Disposer, error) {
+	return f.tryScopedEffect(label, body, false)
+}
+
+// tryScopedEffect is the shared body of tryEffect and tryFiberEffect. A scoped
+// registration consults and updates f.current; an unscoped one is added to the
+// fiber's own list and leaves the scope marker alone.
+func (f *Fiber) tryScopedEffect(label string, body func() Disposer, scoped bool) (Disposer, error) {
 	f.mu.Lock()
 	if f.disposed || f.state == StateUnloading {
 		f.mu.Unlock()
@@ -316,24 +338,29 @@ func (f *Fiber) tryEffect(label string, body func() Disposer) (Disposer, error) 
 			"cannot create effect on inactive context %q", f.Name())
 	}
 	entry := &effectEntry{meta: &EffectMeta{Label: label}, running: true}
-	parentEffect := f.current
+	var parentEffect *effectEntry
 	var remove func() bool
-	if parentEffect != nil && !parentEffect.adopt(entry) {
-		// The enclosing effect finished (or was unwound) meanwhile; owning the
-		// entry there would leave its disposer unreachable.
-		parentEffect = nil
-	}
-	if parentEffect == nil {
+	if scoped {
+		parentEffect = f.current
+		if parentEffect != nil && !parentEffect.adopt(entry) {
+			// The enclosing effect finished (or was unwound) meanwhile; owning
+			// the entry there would leave its disposer unreachable.
+			parentEffect = nil
+		}
+		if parentEffect == nil {
+			_, remove = f.disposables.add(entry)
+		}
+		f.current = entry
+	} else {
 		_, remove = f.disposables.add(entry)
 	}
-	f.current = entry
 	f.mu.Unlock()
 
 	dispose, panicked := runEffectBody(body)
 	entry.finishBody()
 
 	f.mu.Lock()
-	if f.current == entry {
+	if scoped && f.current == entry {
 		// Restore the enclosing scope. A registration from another goroutine may
 		// be current by now: leave it alone rather than clobbering it with this
 		// call's captured parent.
