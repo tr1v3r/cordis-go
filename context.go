@@ -178,9 +178,10 @@ func (c *core) nextScope(name string) string {
 // Done is closed when this context's fiber is disposed.
 func (c *Context) Done() <-chan struct{} { return c.fiber.done }
 
-// Context returns a context.Context that is cancelled when this context's
-// fiber is disposed. Hand it to goroutines started by a plugin so that they
-// stop when the plugin unloads.
+// Context returns a context.Context that is cancelled when the owning fiber
+// is disposed. Hand it to goroutines started by a plugin so that they stop
+// when the fiber is disposed. Dependency-driven unloads do not cancel it: use
+// OnDispose to stop resources that must not survive a reload.
 func (c *Context) Context() context.Context { return c.fiber.lifecycleCtx }
 
 // OnDispose registers a disposer owned by this context's fiber. Disposers run
@@ -222,7 +223,7 @@ func (c *Context) Lookup(name string) (any, bool) {
 	if binding == nil {
 		return nil, false
 	}
-	return binding.service, true
+	return binding.getService(), true
 }
 
 // resolveService mirrors Cordis's context proxy lookup: walk the owning fiber's
@@ -262,7 +263,7 @@ func (c *Context) Get[T any](name string) (T, bool) {
 	if binding == nil {
 		return zero, false
 	}
-	service, ok := binding.service.(T)
+	service, ok := binding.getService().(T)
 	if !ok {
 		return zero, false
 	}
