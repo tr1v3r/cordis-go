@@ -213,6 +213,12 @@ func (l *disposableList) add(entry *effectEntry) (int, func() bool) {
 func (l *disposableList) snapshot() []*effectEntry {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	return l.snapshotLocked()
+}
+
+// snapshotLocked returns the entries in registration order. The caller must
+// hold l.mu.
+func (l *disposableList) snapshotLocked() []*effectEntry {
 	handles := make([]int, 0, len(l.items))
 	for handle := range l.items {
 		handles = append(handles, handle)
@@ -230,17 +236,8 @@ func (l *disposableList) snapshot() []*effectEntry {
 func (l *disposableList) clear() []*effectEntry {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	handles := make([]int, 0, len(l.items))
-	for handle := range l.items {
-		handles = append(handles, handle)
-	}
-	// Newest-first teardown order.
-	slices.Sort(handles)
-	slices.Reverse(handles)
-	entries := make([]*effectEntry, 0, len(handles))
-	for _, handle := range handles {
-		entries = append(entries, l.items[handle])
-		delete(l.items, handle)
-	}
+	entries := l.snapshotLocked()
+	slices.Reverse(entries)
+	l.items = make(map[int]*effectEntry)
 	return entries
 }
