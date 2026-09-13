@@ -3,6 +3,7 @@ package cordis
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -64,31 +65,55 @@ type Fiber struct {
 	// Ctx is the fiber's own context, passed to the plugin body.
 	Ctx *Context
 
+	// runtime, inject and root are fixed when the fiber is constructed.
 	runtime *runtime
 	inject  map[string]struct{}
+	root    bool
 
-	mu               sync.Mutex
+	// Lifetime plumbing, also fixed at construction. Dispose calls cancel and
+	// closes done; finalizeDispose runs the terminal transition once.
+	lifecycleCtx context.Context
+	cancel       context.CancelFunc
+	done         chan struct{}
+	disposeOnce  sync.Once
+
+	// disposables is the fiber's owned effect tree: each entry pairs a label
+	// with the disposer that releases it, and nested effects become children.
+	// The pointer is fixed at construction and the list synchronizes itself,
+	// so mu does not guard it. The public Effects() exposes only the metadata,
+	// not the disposers.
+	disposables *disposableList
+
+	// mu guards the mutable fields below.
+	mu sync.Mutex
+
+	// Current generation: lifecycle state, dependency epoch, and what load
+	// derived from that epoch.
 	state            FiberState
 	err              error
 	epoch            string
-	resolvedServices map[string]*serviceBinding
 	config           any
 	rawConfig        any
-	effects          *disposableList
-	busy             bool
-	dirty            bool
-	reloadRequested  bool
-	disposed         bool
-	cleaned          bool
-	root             bool
-	current          *effectEntry
+	resolvedServices map[string]*serviceBinding
 
-	done                 chan struct{}
-	disposedDone         chan struct{}
-	lifecycleCtx         context.Context
-	cancel               context.CancelFunc
+	// Transition driver: busy marks the owner of a pass, dirty records a rerun
+	// request, and forceReload/disposed are requests consumed by sync.
+	busy        bool
+	dirty       bool
+	forceReload bool
+	disposed    bool
+
+	// live marks a generation claimed by load and not yet released by unload.
+	// It is set before the body runs and cleared before disposers run, so it
+	// stays true for an active fiber even when it registered no effects.
+	live bool
+
+	// current is the effect whose body is running; registrations inside it
+	// become its children.
+	current *effectEntry
+
+	// parentEffectDisposer releases this fiber's slot in the parent's tree.
 	parentEffectDisposer Disposer
-	disposeOnce          sync.Once
 }
 
 // StatusEvent is emitted as "internal/status" whenever a fiber changes state.
@@ -118,16 +143,16 @@ func newRootFiber(ctx *Context) *Fiber {
 		state:            StateActive,
 		root:             true,
 		resolvedServices: map[string]*serviceBinding{},
-		effects:          newDisposableList(),
+		disposables:      newDisposableList(),
+		live:             true,
 		done:             make(chan struct{}),
-		disposedDone:     make(chan struct{}),
 		lifecycleCtx:     lifecycleCtx,
 		cancel:           cancel,
 	}
 }
 
 func newFiber(parentCtx *Context, runtime *runtime, cfg any,
-	inject map[string]struct{}) (*Fiber, error) {
+	inject map[string]struct{}) *Fiber {
 	lifecycleCtx, cancel := context.WithCancel(parentCtx.fiber.lifecycleCtx)
 	fiber := &Fiber{
 		Parent:       parentCtx,
@@ -136,39 +161,45 @@ func newFiber(parentCtx *Context, runtime *runtime, cfg any,
 		rawConfig:    cfg,
 		state:        StatePending,
 		epoch:        epochInactive,
-		effects:      newDisposableList(),
-		cleaned:      true,
+		disposables:  newDisposableList(),
 		done:         make(chan struct{}),
-		disposedDone: make(chan struct{}),
 		lifecycleCtx: lifecycleCtx,
 		cancel:       cancel,
 	}
 	fiber.UID = parentCtx.shared.nextUID()
 	fiber.Ctx = parentCtx.Fork(runtime.name)
 	fiber.Ctx.fiber = fiber
+	return fiber
+}
 
-	// The parent owns the child's lifetime: disposing the parent disposes every
+// start attaches the fiber to its parent and publishes it. It returns an error
+// when the parent is already unloading or disposed, so the caller must abort
+// instead of leaving an orphan fiber behind.
+func (f *Fiber) start() error {
+	parent := f.Parent
+
+	// The parent owns the child lifetime: disposing the parent disposes every
 	// plugin loaded beneath it. Use tryEffect so a parent that starts unloading
 	// during Load returns an error instead of panicking out of the constructor.
-	parentEffectDisposer, err := parentCtx.fiber.tryEffect("child",
-		func() Disposer { return fiber.Dispose })
+	parentEffectDisposer, err := parent.fiber.tryEffect("child",
+		func() Disposer { return f.Dispose })
 	if err != nil {
-		cancel()
-		return nil, err
+		return err
 	}
-	fiber.mu.Lock()
-	if fiber.disposed {
-		fiber.mu.Unlock()
+	f.mu.Lock()
+	if f.disposed {
+		f.mu.Unlock()
 		parentEffectDisposer()
 	} else {
-		fiber.parentEffectDisposer = parentEffectDisposer
-		fiber.mu.Unlock()
+		f.parentEffectDisposer = parentEffectDisposer
+		f.mu.Unlock()
 	}
-	parentCtx.shared.addFiber(runtime, fiber)
-	parentCtx.shared.bus.emitInternal("internal/plugin", &PluginEvent{Fiber: fiber})
-	fiber.refresh()
-	return fiber, nil
+	f.shared().addFiber(f.runtime, f)
+	f.shared().bus.emitInternal("internal/plugin", &PluginEvent{Fiber: f})
+	f.refresh()
+	return nil
 }
+
 func (f *Fiber) shared() *core { return f.Ctx.shared }
 
 // State returns the current lifecycle state.
@@ -177,15 +208,6 @@ func (f *Fiber) State() FiberState {
 	defer f.mu.Unlock()
 	return f.state
 }
-
-// Disposed returns a channel closed once this fiber reaches StateDisposed.
-//
-// It is a barrier for the terminal state of this fiber, not for every resource
-// in its subtree. An effect body that was still initializing when teardown began
-// may run its disposer after Disposed closes, and a busy child fiber may finish
-// its own cleanup later. Use it to wait for this fiber to reach its terminal
-// state, not as a whole-subtree cleanup barrier.
-func (f *Fiber) Disposed() <-chan struct{} { return f.disposedDone }
 
 // Error returns the error that failed the last load, if any.
 func (f *Fiber) Error() error {
@@ -244,7 +266,7 @@ func (f *Fiber) Store() map[string]any {
 
 // Effects returns the live effect metadata tree of this fiber.
 func (f *Fiber) Effects() []*EffectMeta {
-	entries := f.effects.snapshot()
+	entries := f.disposables.snapshot()
 	out := make([]*EffectMeta, 0, len(entries))
 	for _, entry := range entries {
 		out = append(out, entry.meta)
@@ -287,7 +309,7 @@ func (f *Fiber) tryEffect(label string, body func() Disposer) (Disposer, error) 
 		// effect collector: disposing the outer effect disposes its children.
 		parentEffect.addChild(entry)
 	} else {
-		_, remove = f.effects.add(entry)
+		_, remove = f.disposables.add(entry)
 	}
 	f.current = entry
 	f.mu.Unlock()
@@ -340,7 +362,7 @@ func (f *Fiber) runDisposer(entry *effectEntry) {
 		f.callDisposer(entry, dispose)
 	}
 	// Nested effects unwind after their owner, newest first.
-	for i := len(children) - 1; i >= 0; i-- {
+	for i := range slices.Backward(children) {
 		f.runDisposer(children[i])
 	}
 }
@@ -355,99 +377,164 @@ func (f *Fiber) callDisposer(entry *effectEntry, dispose Disposer) {
 	dispose()
 }
 
-// refresh recomputes the dependency epoch and drives a load/unload transition.
-//
-// It is re-entrant safe: nested refresh requests set a dirty flag that the
-// outermost call drains, so a plugin that provides a service another plugin
-// waits for cannot recurse without bound.
-func (f *Fiber) refresh() {
-	f.mu.Lock()
-	if f.busy {
-		f.dirty = true
-		f.mu.Unlock()
-		return
-	}
-	f.busy = true
-	f.mu.Unlock()
+// The per-fiber transition driver gives one caller ownership of a transition
+// pass while other callers record that another pass is needed instead of
+// starting a second one.
 
+// refresh requests one transition pass. If another pass is already running,
+// the request is recorded for that owner instead of starting a second one.
+func (f *Fiber) refresh() {
+	if f.beginTransition() {
+		f.drive()
+	}
+}
+
+// drive drains transition passes until no caller asked for another one.
+func (f *Fiber) drive() {
 	for {
+		// Begin a pass: clear the rerun marker for this transition.
 		f.mu.Lock()
 		f.dirty = false
 		f.mu.Unlock()
 
 		f.sync()
 
-		// Re-check under the same lock that clears busy: Dispose sets dirty
-		// under this lock, so either the loop sees it and unwinds, or it sees
-		// busy==false and performs the teardown itself. Both orders are safe.
+		// End a pass: keep ownership when another request arrived while sync
+		// was running; otherwise release it and stop.
 		f.mu.Lock()
-		if !f.dirty {
-			f.busy = false
+		dirty := f.dirty
+		if dirty {
 			f.mu.Unlock()
-			return
+			continue
 		}
+		f.busy = false
 		f.mu.Unlock()
+		return
 	}
 }
 
+// beginTransition tries to become the transition owner. It reports false when
+// another pass is running; that owner is marked for one more pass.
+func (f *Fiber) beginTransition() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.busy {
+		f.dirty = true
+		return false
+	}
+	f.busy = true
+	return true
+}
+
+// sync reconciles one fiber with its pending requests and current dependencies.
 func (f *Fiber) sync() {
+	// Root and runtime-less fibers do not own a plugin generation.
 	if f.root || f.runtime == nil {
 		return
 	}
 
+	// Consume pending requests first. Disposal is terminal and forceReload
+	// must be observed even when the dependency epoch is unchanged.
 	f.mu.Lock()
 	disposed := f.disposed
-	reload := f.reloadRequested
-	if reload {
-		f.reloadRequested = false
-	}
+	forceReload := f.forceReload
+	f.forceReload = false
 	f.mu.Unlock()
 
+	// Dispose wins over every other transition; unload finalizes the fiber.
 	if disposed {
 		f.unload()
 		return
 	}
-
-	if reload {
-		f.unload()
-		f.mu.Lock()
-		if f.disposed {
-			f.mu.Unlock()
-			f.unload()
-			return
-		}
-		f.epoch = epochInactive
-		f.err = nil
-		f.mu.Unlock()
+	// Restart and Update force a new generation even when dependencies match.
+	if forceReload {
+		f.reload()
+		return
 	}
 
-	resolved, epoch := f.resolveInjections()
+	// Resolve the current dependency generation. The returned epoch is both
+	// the decision key and the identity of this generation.
+	bindings, epoch := f.resolveInjections()
 
+	// Snapshot the comparison inputs under one lock so the decision below is
+	// based on a single observed state.
 	f.mu.Lock()
-	if f.disposed || epoch == f.epoch {
+	same := epoch == f.epoch
+	live := f.live
+	f.mu.Unlock()
+
+	switch {
+	case same:
+		// The recorded generation still matches the dependencies in place.
+		return
+	case epoch == epochInactive:
+		// Dependencies are gone; release the current generation.
+		f.applyUnload()
+	case live:
+		// A new generation is available, but the old one is still live.
+		// reload unloads it first and resolves the new world afterwards.
+		f.reload()
+	default:
+		// The fiber is clean; start the resolved generation directly.
+		f.applyLoad(bindings, epoch)
+	}
+}
+
+// applyUnload records the inactive epoch and unloads the current generation.
+func (f *Fiber) applyUnload() {
+	f.mu.Lock()
+	if f.disposed {
+		f.mu.Unlock()
+		return
+	}
+	f.epoch = epochInactive
+	f.mu.Unlock()
+	f.unload()
+}
+
+// applyLoad commits the resolved epoch and runs the plugin body on a clean
+// fiber.
+func (f *Fiber) applyLoad(bindings map[string]*serviceBinding, epoch string) {
+	f.mu.Lock()
+	if f.disposed {
 		f.mu.Unlock()
 		return
 	}
 	f.epoch = epoch
-	cleaned := f.cleaned
 	f.mu.Unlock()
+	f.load(bindings)
+}
 
-	if epoch == epochInactive {
-		f.unload()
-		return
-	}
-	if !cleaned {
-		f.unload()
-	}
+// reload forces an unload/reload cycle for Restart and Update. It resets the
+// recorded epoch so the next load runs even when dependencies are unchanged.
+func (f *Fiber) reload() {
+	f.unload()
 
 	f.mu.Lock()
-	disposed = f.disposed
-	f.mu.Unlock()
-	if disposed {
-		f.unload()
+	if f.disposed {
+		f.mu.Unlock()
+		// Dispose set dirty; the refresh owner will run the dispose action next.
 		return
 	}
-	f.load(resolved)
+	f.epoch = epochInactive
+	f.err = nil
+	f.mu.Unlock()
+
+	// Resolve after the old generation is gone: unload may have changed the
+	// service registry, so pre-unload bindings can already be stale.
+	bindings, epoch := f.resolveInjections()
+
+	f.mu.Lock()
+	if f.disposed || epoch == epochInactive {
+		f.mu.Unlock()
+		return
+	}
+	f.epoch = epoch
+	f.mu.Unlock()
+
+	// reload unloaded the previous generation at entry, so the fiber is clean
+	// here. load re-checks disposed before it starts the new body.
+	f.load(bindings)
 }
 
 // resolveInjections resolves every injected service and encodes the provider
@@ -455,43 +542,49 @@ func (f *Fiber) sync() {
 // load never runs against an epoch that describes another generation.
 func (f *Fiber) resolveInjections() (map[string]*serviceBinding, string) {
 	names := f.Inject()
-	resolved := make(map[string]*serviceBinding, len(names))
+	bindings := make(map[string]*serviceBinding, len(names))
 	var builder strings.Builder
 	for _, name := range names {
 		binding := f.shared().lookupService(f.Ctx.isolateLabel(name))
 		if binding == nil {
 			return nil, epochInactive
 		}
-		resolved[name] = binding
+		bindings[name] = binding
 		builder.WriteByte(':')
 		builder.WriteString(strconv.Itoa(binding.provider.UID))
 	}
-	return resolved, builder.String()
+	return bindings, builder.String()
 }
 
-func (f *Fiber) load(resolved map[string]*serviceBinding) {
+// load runs one plugin generation from a dependency snapshot resolved by sync.
+//
+// The caller is the refresh owner. load still re-checks disposed and provider
+// liveness because callbacks and concurrent disposal can invalidate the decision.
+func (f *Fiber) load(bindings map[string]*serviceBinding) {
 	f.mu.Lock()
 	if f.disposed {
 		f.mu.Unlock()
 		return
 	}
-	f.cleaned = false
+	f.live = true
 	f.mu.Unlock()
 	if !f.setState(StateLoading) {
 		return
 	}
-	for _, binding := range resolved {
+	// Don't run the body against a provider disposed after resolution. Defense,
+	// not correctness: later deaths go through unload's unregister+notify,
+	// which marks a rerun; the check stays because it is cheap.
+	for _, binding := range bindings {
 		if binding.live() {
 			continue
 		}
-		// A provider vanished while the load was being prepared. Ask the
-		// refresh owner to re-evaluate before running the plugin body.
+		// Record the rerun; drive re-resolves on the next pass.
 		f.refresh()
 		return
 	}
 
 	f.mu.Lock()
-	f.resolvedServices = resolved
+	f.resolvedServices = bindings
 	raw := f.rawConfig
 	f.mu.Unlock()
 
@@ -546,9 +639,16 @@ func (f *Fiber) fail(err error) {
 	f.shared().log.errorf("cordis: plugin %s failed to load: %v", f.Name(), err)
 }
 
+// unload releases the current generation of effects.
+//
+// The caller is the refresh owner. unload is idempotent: a disposed fiber
+// finishes through finalizeDispose, otherwise it returns to pending.
 func (f *Fiber) unload() {
 	f.mu.Lock()
-	if f.cleaned {
+	if f.live {
+		f.live = false
+		f.mu.Unlock()
+	} else {
 		disposed := f.disposed
 		f.mu.Unlock()
 		if disposed {
@@ -556,11 +656,9 @@ func (f *Fiber) unload() {
 		}
 		return
 	}
-	f.cleaned = true
-	f.mu.Unlock()
 
 	f.setState(StateUnloading)
-	for _, entry := range f.effects.clear() {
+	for _, entry := range f.disposables.clear() {
 		f.runDisposer(entry)
 	}
 	f.mu.Lock()
@@ -588,7 +686,6 @@ func (f *Fiber) finalizeDispose() {
 		if parentEffectDisposer != nil {
 			parentEffectDisposer()
 		}
-		close(f.disposedDone)
 	})
 }
 
@@ -632,12 +729,10 @@ func (f *Fiber) Dispose() {
 		return
 	}
 	f.disposed = true
-	busy := f.busy
-	if busy {
-		// Mark dirty in the same critical section that reads busy, so the
-		// refresh loop cannot clear busy and exit before seeing this request.
-		f.dirty = true
-	}
+	// Mark a rerun before the cancel/remove/emit steps so a running owner can
+	// start teardown without waiting for them. refresh clears the marker on the
+	// first pass when no owner is running.
+	f.dirty = true
 	f.mu.Unlock()
 
 	// Stop dependent goroutines immediately, then unwind effects.
@@ -649,11 +744,6 @@ func (f *Fiber) Dispose() {
 		f.shared().bus.emitInternal("internal/plugin", &PluginEvent{Fiber: f})
 	}
 
-	if busy {
-		// A transition is in flight. The dirty flag was set atomically above;
-		// the loop in refresh() observes it and unwinds.
-		return
-	}
 	if f.root {
 		f.unload()
 		return
@@ -669,7 +759,7 @@ func (f *Fiber) Restart() error {
 		return err
 	}
 	f.mu.Lock()
-	f.reloadRequested = true
+	f.forceReload = true
 	f.mu.Unlock()
 	f.refresh()
 	return f.Error()
@@ -685,7 +775,7 @@ func (f *Fiber) Update(config any) error {
 	f.mu.Lock()
 	f.rawConfig = config
 	f.err = nil
-	f.reloadRequested = true
+	f.forceReload = true
 	f.mu.Unlock()
 	f.refresh()
 	return f.Error()

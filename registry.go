@@ -147,8 +147,9 @@ func load(parentCtx *Context, definition definition, config any, extra []string)
 	if err != nil {
 		return nil, err
 	}
-	fiber, err := newFiber(parentCtx, runtime, config, inject)
-	if err != nil {
+	fiber := newFiber(parentCtx, runtime, config, inject)
+	if err := fiber.start(); err != nil {
+		fiber.cancel()
 		return nil, err
 	}
 	if fiber.State() == StateFailed {
