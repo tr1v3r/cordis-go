@@ -44,6 +44,7 @@ type core struct {
 	runtimes        map[definition]*runtime
 	counter         int
 	scopeSeq        int
+	bindingSeq      int
 	root            *Context
 	bus             *eventBus
 	log             *loggerService

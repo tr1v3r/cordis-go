@@ -554,8 +554,9 @@ func (f *Fiber) reload() {
 }
 
 // resolveInjections resolves every injected service and encodes the provider
-// identity into one epoch. The snapshot and epoch come from the same pass, so a
-// load never runs against an epoch that describes another generation.
+// identity and the binding identity into one epoch. The snapshot and epoch come
+// from the same pass, so a load never runs against an epoch that describes
+// another generation.
 func (f *Fiber) resolveInjections() (map[string]*serviceBinding, string) {
 	names := f.Inject()
 	bindings := make(map[string]*serviceBinding, len(names))
@@ -566,8 +567,13 @@ func (f *Fiber) resolveInjections() (map[string]*serviceBinding, string) {
 			return nil, epochInactive
 		}
 		bindings[name] = binding
+		// The binding sequence matters as much as the provider: a provider that
+		// releases its registration and provides the name again keeps its UID,
+		// but a dependent pinned to the released object must still reload.
 		builder.WriteByte(':')
 		builder.WriteString(strconv.Itoa(binding.provider.UID))
+		builder.WriteByte('.')
+		builder.WriteString(strconv.Itoa(binding.seq))
 	}
 	return bindings, builder.String()
 }

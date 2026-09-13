@@ -13,6 +13,10 @@ type serviceBinding struct {
 	provider          *Fiber
 	service           any
 	availabilityCheck func() bool
+	// seq identifies this registration among all others, so a dependency epoch
+	// can tell a rebound service from the binding it replaced even when the same
+	// fiber provides it again.
+	seq int
 
 	mu sync.RWMutex
 }
@@ -44,6 +48,7 @@ func provide(c *Context, name string, service any,
 		provider:          ownerFiber,
 		service:           service,
 		availabilityCheck: availabilityCheck,
+		seq:               c.shared.nextBindingSeq(),
 	}
 
 	// Report a dead owner as a typed error rather than panicking out of a
@@ -117,6 +122,14 @@ func (c *core) updateService(binding *serviceBinding, service any) bool {
 		return true
 	}
 	return false
+}
+
+// nextBindingSeq hands out binding identities in registration order.
+func (c *core) nextBindingSeq() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.bindingSeq++
+	return c.bindingSeq
 }
 
 func (c *core) registerService(binding *serviceBinding) error {
