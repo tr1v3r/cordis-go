@@ -83,6 +83,11 @@ func (c *Context) OnValue[E any](name string, fn func(E) any, opts ...EventOptio
 
 // OnWaterfall registers a listener that wraps the rest of a Waterfall chain.
 // Calling next continues the chain; not calling it vetoes the remainder.
+//
+// A chain settles at most once. Calling next again after the chain already
+// reached final returns the settled result instead of running final twice, and
+// a listener that panics after next returned is reported like any other failing
+// listener without disturbing that result.
 func (c *Context) OnWaterfall[E any](name string, fn func(E, func(E) any) any,
 	opts ...EventOption) Disposer {
 	return c.on(name, func(payload any, next func(any) any) any {
@@ -307,6 +312,13 @@ func waterfallWith[E any](c *Context, name string, payload E, final func(E) any,
 	filter func(*eventListener) bool) any {
 	listeners := c.shared.bus.selectListeners(name, filter)
 	index := 0
+	// settled and settledResult latch the chain's single settlement. Cordis
+	// settles a waterfall once, but two things here can reach the final call
+	// twice: a listener that panics after next returned unwinds back into this
+	// loop, and a listener that calls next again re-enters the tail. The latch
+	// is taken before final runs, so a panicking final cannot run twice either.
+	settled := false
+	var settledResult any
 	var next func(any) any
 	next = func(value any) any {
 		for index < len(listeners) {
@@ -329,10 +341,15 @@ func waterfallWith[E any](c *Context, name string, payload E, final func(E) any,
 			}
 			return result
 		}
+		if settled {
+			return settledResult
+		}
+		settled = true
 		if final == nil {
 			return nil
 		}
-		return final(assertPayload[E](name, value))
+		settledResult = final(assertPayload[E](name, value))
+		return settledResult
 	}
 	return next(payload)
 }
