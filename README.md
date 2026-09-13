@@ -336,7 +336,10 @@ make ci      # CI 跑的东西：gofmt 检查 + go vet + staticcheck + revive + 
 
 - 需要 **Go 1.27+**：事件分发、插件加载与服务访问用泛型方法（`go.mod` 的 `go 1.27.0` 即最低
   工具链要求）
-- 零第三方依赖（`go list -m all` 只有本模块），配置解码用标准库 `encoding/json`
+- 运行路径零第三方依赖（库本身不 import 任何第三方模块），配置解码用标准库 `encoding/json`；
+  测试工具链引入 `go.uber.org/goleak` 作为**唯一的测试期依赖**，两个被测包各挂一个
+  `TestMain`，套件跑完后校验没有测试遗留 goroutine（dispose / 卸载 / 回滚路径漏掉的协程
+  会被整个包的红灯抓出来）
 - `go vet` / `go test -race` 全绿。测试分两层：单元测试与跨特性集成测试（`integration_*.go`，
   `make integration` 以 `-race -count=3` 重复跑，独立 workflow 验证）。覆盖率现场量：
   `go test -race -cover ./...` 给出核心包 93% 上下、`loader` 92% 上下。这两个数字只是某个 dev
