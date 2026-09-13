@@ -106,7 +106,13 @@ func TestLoggerWithoutWriterDiscardsOutput(t *testing.T) {
 	root := cordis.New(cordis.WithWriter(nil))
 	defer root.Fiber().Dispose()
 
-	root.Logger("app").Error("dropped")
+	app := root.Logger("app")
+	if app.Name() != "app" {
+		t.Fatalf("want the given logger name, got %q", app.Name())
+	}
+	// Reaching the end without panicking is the assertion: the logger writes
+	// into io.Discard instead of a nil writer.
+	app.Error("dropped")
 }
 
 func TestLevelString(t *testing.T) {
