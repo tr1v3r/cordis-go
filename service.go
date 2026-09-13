@@ -227,7 +227,7 @@ func (b *serviceBinding) reportPanic(reason any) {
 	b.panicked = true
 	b.mu.Unlock()
 	if first {
-		b.log.errorf("cordis: availability check of service %q panicked: %v",
+		b.log.errorf("availability check of service %q panicked: %v",
 			b.name, reason)
 	}
 }
