@@ -322,6 +322,7 @@ make ci      # CI 跑的东西：gofmt 检查 + go vet + staticcheck + revive + 
 | `make lint` | gofmt 检查 + `go vet` + `staticcheck` + `revive -config .revive.toml` |
 | `make test` | `go test -race ./...` |
 | `make integration` | `go test -race -count=3 ./...`，重复跑以抖出时序问题；`.github/workflows/integration.yml` 执行 |
+| `make fuzz` | 对 loader 配置路径模糊测试 30s（`FuzzCompose`；种子语料随普通 `go test` 回归） |
 | `make tools` | 安装固定版本的 staticcheck / revive |
 | `make ci` | `lint` + `test`，`.github/workflows/ci.yml` 执行同一入口 |
 
@@ -340,8 +341,10 @@ make ci      # CI 跑的东西：gofmt 检查 + go vet + staticcheck + revive + 
   测试工具链引入 `go.uber.org/goleak` 作为**唯一的测试期依赖**，两个被测包各挂一个
   `TestMain`，套件跑完后校验没有测试遗留 goroutine（dispose / 卸载 / 回滚路径漏掉的协程
   会被整个包的红灯抓出来）
-- `go vet` / `go test -race` 全绿。测试分两层：单元测试与跨特性集成测试（`integration_*.go`，
-  `make integration` 以 `-race -count=3` 重复跑，独立 workflow 验证）。覆盖率现场量：
+- `go vet` / `go test -race` 全绿。测试分三层：单元测试、跨特性集成测试（`integration_*.go`，
+  `make integration` 以 `-race -count=3` 重复跑，独立 workflow 验证）、以及 loader 配置路径的
+  模糊测试（`FuzzCompose`，`make fuzz`，CI 里每次跑 30s；写这条时的验证轮已跑过 390 万次执行）。
+  两个被测包各挂一个 `TestMain` 做泄漏检测。覆盖率现场量：
   `go test -race -cover ./...` 给出核心包 93% 上下、`loader` 92% 上下。这两个数字只是某个 dev
   基线上的量级，会随提交变化（加一个测试就会动），所以这里不写死——要当前值就跑那条命令。
   `examples/` 不在统计里（示例靠 `go run` 验证）；`cmd/cordis` 的退出码契约由它自己的进程内测试
