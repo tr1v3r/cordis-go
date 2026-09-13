@@ -10,7 +10,7 @@ GOFMT       ?= gofmt
 STATICCHECK ?= staticcheck
 REVIVE      ?= revive
 
-.PHONY: all fmt vet lint test tools ci
+.PHONY: all fmt vet lint test integration tools ci
 
 all: ci
 
@@ -34,6 +34,13 @@ lint: vet
 
 test:
 	$(GO) test -race ./...
+
+# Everything the integration workflow runs: the whole suite under the race
+# detector, three times over. A single run can hide ordering- and timing-
+# dependent failures behind one lucky schedule, and a plain repeat would be
+# answered from the test cache; -count=3 forces real reruns so flakes surface.
+integration:
+	$(GO) test -race -count=3 ./...
 
 # Install the lint tools at the versions this repository is verified against.
 tools:
