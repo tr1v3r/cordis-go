@@ -430,6 +430,25 @@ func (f *Fiber) claimDispose() (busy, already bool) {
 	return false, false
 }
 
+// transitionRequest captures the volatile requests observed at the start of a
+// transition pass.
+type transitionRequest struct {
+	disposed bool
+	reload   bool
+}
+
+// takeRequest consumes pending transition requests under the fiber lock.
+func (f *Fiber) takeRequest() transitionRequest {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	req := transitionRequest{
+		disposed: f.disposed,
+		reload:   f.reloadRequested,
+	}
+	f.reloadRequested = false
+	return req
+}
+
 // fiberAction selects one transition in the fiber lifecycle state machine.
 type fiberAction uint8
 
@@ -462,18 +481,11 @@ func (f *Fiber) plan() fiberPlan {
 		return fiberPlan{action: actionNoop}
 	}
 
-	f.mu.Lock()
-	disposed := f.disposed
-	reload := f.reloadRequested
-	if reload {
-		f.reloadRequested = false
-	}
-	f.mu.Unlock()
-
-	if disposed {
+	req := f.takeRequest()
+	if req.disposed {
 		return fiberPlan{action: actionDispose}
 	}
-	if reload {
+	if req.reload {
 		return fiberPlan{action: actionReload}
 	}
 
