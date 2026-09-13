@@ -2,10 +2,13 @@ package loader_test
 
 import (
 	"math"
+	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
+	cordis "github.com/tr1v3r/cordis-go"
 	"github.com/tr1v3r/cordis-go/loader"
 )
 
@@ -51,6 +54,35 @@ func TestDumpOfOnlyNilNodesIsEmpty(t *testing.T) {
 	}
 	if dump := tree.DumpString(); !strings.Contains(dump, "# (empty)") {
 		t.Fatalf("want the empty marker, got:\n%s", dump)
+	}
+}
+
+// TestLoadSkipsNilNodesInAHandBuiltTree pins the policy the nil-tolerant
+// walkers mirror: Load already skipped nil entries, so a tree a host built by
+// hand loads its real entries and ignores the nils instead of failing.
+func TestLoadSkipsNilNodesInAHandBuiltTree(t *testing.T) {
+	registry := loader.NewRegistry()
+	var loaded []string
+	loader.MustRegister(registry, "db",
+		cordis.Define[struct{}]("db", func(_ *cordis.Context, _ struct{}) error {
+			loaded = append(loaded, "db")
+			return nil
+		}))
+	tree := &loader.Tree{Nodes: []*loader.Node{
+		nil,
+		{ID: "real", Name: "db"},
+		nil,
+	}}
+
+	fibers, err := tree.Load(cordis.New(), registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fibers) != 1 {
+		t.Fatalf("want 1 fiber for the real entry, got %d", len(fibers))
+	}
+	if !reflect.DeepEqual(loaded, []string{"db"}) {
+		t.Fatalf("want the real entry loaded, got %v", loaded)
 	}
 }
 
@@ -104,5 +136,32 @@ func TestLoadLayerDefaultsTheLabelBeforeReading(t *testing.T) {
 				t.Fatalf("want the path in %q", err)
 			}
 		})
+	}
+}
+
+// TestLoadLayerDefaultsTheLabelOnSuccess completes the label fallback: when the
+// read succeeds the layer keeps the path as its label, so provenance names the
+// file exactly the way the error path does.
+func TestLoadLayerDefaultsTheLabelOnSuccess(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "layer.json")
+	if err := os.WriteFile(path, []byte(`[]`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	layer, err := loader.LoadLayer("", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if layer.Label != path {
+		t.Fatalf("want the path as the layer label, got %q", layer.Label)
+	}
+
+	patched, err := loader.LoadPatchLayer("", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if patched.Label != path || !patched.Patch {
+		t.Fatalf("want the path as the label and a patch layer, got %q patch=%v",
+			patched.Label, patched.Patch)
 	}
 }

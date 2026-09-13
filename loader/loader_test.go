@@ -279,6 +279,37 @@ func TestComposeOwnsTheConfigItStores(t *testing.T) {
 	}
 }
 
+// TestComposePatchOwnsTheConfigItApplies extends the ownership pin to the patch
+// path: a patch layer replaces the config through the same clone, and that copy
+// must not alias the patch either - the config a profile layer carries can be
+// reused for several targets.
+func TestComposePatchOwnsTheConfigItApplies(t *testing.T) {
+	nested := map[string]any{"path": "patch.db"}
+	profile := loader.Layer{Label: "profile", Patch: true, Entries: []*loader.Patch{{
+		ID:     "db",
+		Config: map[string]any{"nested": nested},
+	}}}
+	base := loader.Layer{Label: "base", Entries: []*loader.Patch{{ID: "db", Name: strptr("db")}}}
+
+	tree, err := loader.Compose([]loader.Layer{base, profile})
+	if err != nil {
+		t.Fatal(err)
+	}
+	node := tree.Find("db")
+	if node == nil {
+		t.Fatal("want the db entry, got nil")
+	}
+
+	nested["path"] = "changed-in-patch"
+	if got := node.Config["nested"].(map[string]any)["path"]; got != "patch.db" {
+		t.Fatalf("want the applied patch config at patch.db, got %v", got)
+	}
+	node.Config["nested"].(map[string]any)["path"] = "changed-in-tree"
+	if got := nested["path"]; got != "changed-in-patch" {
+		t.Fatalf("want the patch unchanged at changed-in-patch, got %v", got)
+	}
+}
+
 func TestTreeLoadRollsBackOnError(t *testing.T) {
 	registry := loader.NewRegistry()
 	var events []string
