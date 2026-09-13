@@ -9,6 +9,7 @@
 make tools   # 一次性：安装固定版本的 staticcheck / revive
 make ci      # 改完必须绿：gofmt 检查 + vet + staticcheck + revive + go test -race
 make fmt     # 也可以单跑某一环：make fmt / vet / lint / test
+make integration  # 跨特性集成测试：go test -race -count=3 ./...（CI 里是独立 workflow）
 ```
 
 **需要 Go 1.27+**（`go.mod` 声明 `go 1.27.0`）：事件分发、插件加载与服务访问是泛型方法，属于
