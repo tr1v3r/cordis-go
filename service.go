@@ -13,6 +13,10 @@ type serviceBinding struct {
 	provider          *Fiber
 	service           any
 	availabilityCheck func() bool
+	// seq identifies this registration among all others, so a dependency epoch
+	// can tell a rebound service from the binding it replaced even when the same
+	// fiber provides it again.
+	seq int
 
 	mu sync.RWMutex
 	// panicked records that a panicking availability check was already
@@ -51,6 +55,7 @@ func provide(c *Context, name string, service any,
 		provider:          ownerFiber,
 		service:           service,
 		availabilityCheck: availabilityCheck,
+		seq:               c.shared.nextBindingSeq(),
 		log:               c.shared.log,
 	}
 
@@ -99,7 +104,9 @@ func provide(c *Context, name string, service any,
 func setService(c *Context, name string, service any) error {
 	scopeLabel := c.isolateLabel(name)
 	binding := c.shared.getServiceBinding(scopeLabel)
-	if binding == nil {
+	// A binding registered under another name is not this service, so a Set for
+	// an unknown name must not overwrite the service that shares its label.
+	if binding == nil || binding.name != name {
 		return newError(ErrServiceMissing, "cannot set service %q before it is provided", name)
 	}
 	if binding.provider != c.fiber {
@@ -125,6 +132,14 @@ func (c *core) updateService(binding *serviceBinding, service any) bool {
 		return true
 	}
 	return false
+}
+
+// nextBindingSeq hands out binding identities in registration order.
+func (c *core) nextBindingSeq() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.bindingSeq++
+	return c.bindingSeq
 }
 
 func (c *core) registerService(binding *serviceBinding) error {
@@ -156,11 +171,14 @@ func (c *core) getServiceBinding(scopeLabel string) *serviceBinding {
 	return c.serviceBindings[scopeLabel]
 }
 
-// lookupService returns a binding only while its provider is active and its
-// availability predicate, if any, passes.
-func (c *core) lookupService(scopeLabel string) *serviceBinding {
+// lookupService returns the binding registered for name in scopeLabel, but only
+// while its provider is active and its availability predicate, if any, passes.
+// A label carries one service name, so a binding registered under another name
+// is not this service: reporting it would alias every name isolated onto that
+// label onto a single service.
+func (c *core) lookupService(scopeLabel, name string) *serviceBinding {
 	binding := c.getServiceBinding(scopeLabel)
-	if binding == nil {
+	if binding == nil || binding.name != name {
 		return nil
 	}
 	if binding.provider != nil && binding.provider.State() != StateActive {
