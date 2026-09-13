@@ -987,6 +987,13 @@ func (f *parallelFailure) fatal(b *testing.B) {
 
 // BenchmarkServiceGetParallel measures the read path under contention: every
 // goroutine walks the same fiber chain and takes the same locks.
+//
+// The lock itself was measured here, because a lookup takes the fiber mutex for
+// one map read. Giving the resolved-services snapshot its own RWMutex made this
+// benchmark 24% slower (108ns to 134ns over five runs) rather than faster: the
+// critical section is a single map lookup, so RWMutex's extra bookkeeping costs
+// more than the serialization it removes. A lock-free snapshot pointer is the
+// remaining lever, and it would spend an allocation on every registration.
 func BenchmarkServiceGetParallel(b *testing.B) {
 	root := cordis.New()
 	service := &benchmarkService{value: 42}
@@ -1032,6 +1039,43 @@ func BenchmarkEventEmitParallel(b *testing.B) {
 
 	if want := int64(b.N) * listeners; calls.Load() != want {
 		b.Fatalf("want %d listener calls, got %d", want, calls.Load())
+	}
+}
+
+// BenchmarkEffectRegisterDisposeParallel measures registering and releasing a
+// side effect from many goroutines on one context. It is the path explicit effect
+// ownership changed most: the fiber used to keep one "current effect" marker that
+// every registration read and overwrote, so this shape both admitted no
+// independent work and serialized on that marker. The regression test for the
+// defect that came with it is TestConcurrentProvideOnOneFiberReleasesTheName.
+func BenchmarkEffectRegisterDisposeParallel(b *testing.B) {
+	for _, shape := range []string{"OnDispose", "Effect"} {
+		b.Run(shape, func(b *testing.B) {
+			root := cordis.New()
+			unwound := atomic.Int64{}
+			b.Cleanup(root.Fiber().Dispose)
+			b.ReportAllocs()
+			b.ResetTimer()
+
+			b.RunParallel(func(pb *testing.PB) {
+				for pb.Next() {
+					var dispose cordis.Disposer
+					if shape == "Effect" {
+						dispose = root.Effect("benchmark",
+							func(*cordis.Context) cordis.Disposer {
+								return func() { unwound.Add(1) }
+							})
+					} else {
+						dispose = root.OnDispose(func() { unwound.Add(1) })
+					}
+					dispose()
+				}
+			})
+
+			if got := unwound.Load(); got != int64(b.N) {
+				b.Fatalf("want %d teardowns, got %d", b.N, got)
+			}
+		})
 	}
 }
 
