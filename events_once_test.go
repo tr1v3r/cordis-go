@@ -86,6 +86,33 @@ func TestOnceListenerRunsOnceUnderConcurrentParallel(t *testing.T) {
 	}
 }
 
+func TestOnceWaterfallListenerRunsOnceUnderConcurrentWaterfall(t *testing.T) {
+	root := cordis.New()
+	var fired atomic.Int32
+	// Both dispatchers must take their bus snapshots before either of them
+	// reaches the once listener: the gate releases exactly when both arrived,
+	// and next hands the chain on to the once listener after the gate.
+	var gate sync.WaitGroup
+	gate.Add(2)
+	cordis.OnWaterfall[string](root, "cmd", func(s string, next func(string) any) any {
+		gate.Done()
+		gate.Wait()
+		return next(s)
+	})
+	cordis.OnWaterfall[string](root, "cmd", func(s string, next func(string) any) any {
+		fired.Add(1)
+		return next(s)
+	}, cordis.WithOnce())
+
+	dispatchConcurrently(2, func() {
+		cordis.Waterfall[string](root, "cmd", "x", func(s string) any { return s })
+	})
+
+	if got := fired.Load(); got != 1 {
+		t.Fatalf("want 1 invocation of a once waterfall listener, got %d", got)
+	}
+}
+
 func TestOnceListenerIsReleasedFromEffectsAfterEmit(t *testing.T) {
 	root := cordis.New()
 	base := len(root.Effects())
@@ -101,6 +128,52 @@ func TestOnceListenerIsReleasedFromEffectsAfterEmit(t *testing.T) {
 	}
 }
 
+func TestOnceListenerThatPanicsIsRetiredAndNotRunAgain(t *testing.T) {
+	root := cordis.New()
+	base := len(root.Effects())
+	var fired atomic.Int32
+	cordis.OnOnce[string](root, "tick", func(string) { fired.Add(1); panic("boom") })
+
+	// The dispatch turns the panic into a logged error, and the listener is
+	// retired even though its body never completed.
+	cordis.Emit[string](root, "tick", "x")
+	if got := fired.Load(); got != 1 {
+		t.Fatalf("want 1 invocation of the panicking once listener, got %d", got)
+	}
+	if got := len(root.Effects()); got != base {
+		t.Fatalf("want %d effects after the panicking once listener ran, got %d", base, got)
+	}
+
+	cordis.Emit[string](root, "tick", "y")
+	if got := fired.Load(); got != 1 {
+		t.Fatalf("want 1 invocation after the retry dispatch, got %d", got)
+	}
+}
+
+func TestOnceListenerDisposerIsIdempotentAfterFire(t *testing.T) {
+	root := cordis.New()
+	base := len(root.Effects())
+	var fired atomic.Int32
+	dispose := cordis.OnOnce[string](root, "tick", func(string) { fired.Add(1) })
+
+	cordis.Emit[string](root, "tick", "x")
+	if got := fired.Load(); got != 1 {
+		t.Fatalf("want 1 invocation of a once listener, got %d", got)
+	}
+
+	// Firing already ran the cleanup through releaseOnce, so the caller's
+	// disposer must stay a no-op instead of resurrecting the listener.
+	dispose()
+	dispose()
+	if got := len(root.Effects()); got != base {
+		t.Fatalf("want %d effects after firing and disposing, got %d", base, got)
+	}
+	cordis.Emit[string](root, "tick", "y")
+	if got := fired.Load(); got != 1 {
+		t.Fatalf("want 1 invocation after disposal, got %d", got)
+	}
+}
+
 func TestOnceWaterfallListenerIsReleasedFromEffects(t *testing.T) {
 	root := cordis.New()
 	base := len(root.Effects())
@@ -112,6 +185,32 @@ func TestOnceWaterfallListenerIsReleasedFromEffects(t *testing.T) {
 
 	if got := len(root.Effects()); got != base {
 		t.Fatalf("want %d effects after the once listener fired, got %d", base, got)
+	}
+}
+
+func TestOnceWaterfallListenerThatPanicsIsStillReleased(t *testing.T) {
+	root := cordis.New()
+	base := len(root.Effects())
+	finals := 0
+	cordis.OnWaterfall[string](root, "cmd", func(string, func(string) any) any {
+		panic("boom")
+	}, cordis.WithOnce())
+
+	// The panic must not keep the effect entry: the listener is retired like on
+	// every other dispatch path, and the chain continues to final.
+	got := cordis.Waterfall[string](root, "cmd", "x", func(s string) any {
+		finals++
+		return "final:" + s
+	})
+
+	if finals != 1 {
+		t.Fatalf("want 1 call to final, got %d", finals)
+	}
+	if got != "final:x" {
+		t.Fatalf("want final:x, got %v", got)
+	}
+	if effects := len(root.Effects()); effects != base {
+		t.Fatalf("want %d effects after the panicking once listener ran, got %d", base, effects)
 	}
 }
 
