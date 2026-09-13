@@ -96,7 +96,9 @@ func provide(c *Context, name string, service any,
 func setService(c *Context, name string, service any) error {
 	scopeLabel := c.isolateLabel(name)
 	binding := c.shared.getServiceBinding(scopeLabel)
-	if binding == nil {
+	// A binding registered under another name is not this service, so a Set for
+	// an unknown name must not overwrite the service that shares its label.
+	if binding == nil || binding.name != name {
 		return newError(ErrServiceMissing, "cannot set service %q before it is provided", name)
 	}
 	if binding.provider != c.fiber {
@@ -161,11 +163,14 @@ func (c *core) getServiceBinding(scopeLabel string) *serviceBinding {
 	return c.serviceBindings[scopeLabel]
 }
 
-// lookupService returns a binding only while its provider is active and its
-// availability predicate, if any, passes.
-func (c *core) lookupService(scopeLabel string) *serviceBinding {
+// lookupService returns the binding registered for name in scopeLabel, but only
+// while its provider is active and its availability predicate, if any, passes.
+// A label carries one service name, so a binding registered under another name
+// is not this service: reporting it would alias every name isolated onto that
+// label onto a single service.
+func (c *core) lookupService(scopeLabel, name string) *serviceBinding {
 	binding := c.getServiceBinding(scopeLabel)
-	if binding == nil {
+	if binding == nil || binding.name != name {
 		return nil
 	}
 	if binding.provider != nil && binding.provider.State() != StateActive {
