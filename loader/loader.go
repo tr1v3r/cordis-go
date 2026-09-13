@@ -338,6 +338,7 @@ func (c *treeComposer) applyPatch(source string, targetNodes *[]*Node, patch *Pa
 		return nil
 	}
 	if len(patch.Insert) > 0 {
+		insertedAny := false
 		for _, insertedEntry := range patch.Insert {
 			if insertedEntry == nil {
 				continue
@@ -361,6 +362,10 @@ func (c *treeComposer) applyPatch(source string, targetNodes *[]*Node, patch *Pa
 			if err := c.indexNode(node); err != nil {
 				return err
 			}
+			insertedAny = true
+		}
+		if insertedAny {
+			c.rebuildIndex()
 		}
 		return nil
 	}
@@ -471,12 +476,9 @@ func mergePatch(node *Node, patch *Patch, source string) {
 	node.Patched = append(node.Patched, source)
 }
 
-// indexNode registers a node and all of its descendants in the global id
-// index, so a later layer can patch a nested group child by id.
-//
-// The first node keeps the id. Overwriting it would send a later patch to one
-// node while Find and Dump keep reporting the other, so the tree would answer
-// "what is configured for x?" differently depending on who asks.
+// indexNode checks a newly created subtree for duplicate ids while adding it to
+// the current index. Its first-wins behavior preserves creation-time duplicate
+// diagnostics; rebuildIndex then restores the index's current DFS ordering.
 func (c *treeComposer) indexNode(node *Node) error {
 	if node == nil {
 		return nil
@@ -498,6 +500,29 @@ func (c *treeComposer) indexNode(node *Node) error {
 		}
 	}
 	return nil
+}
+
+// rebuildIndex makes patch lookup use the same first node in current DFS order
+// as Tree.Find. Structural insertion can put a newly created descendant before
+// a node that was created earlier, so creation-order indexing is not stable.
+func (c *treeComposer) rebuildIndex() {
+	index := make(map[string]*Node, len(c.index))
+	var walk func([]*Node)
+	walk = func(nodes []*Node) {
+		for _, node := range nodes {
+			if node == nil {
+				continue
+			}
+			if node.ID != "" {
+				if _, exists := index[node.ID]; !exists {
+					index[node.ID] = node
+				}
+			}
+			walk(node.Children)
+		}
+	}
+	walk(c.tree.Nodes)
+	c.index = index
 }
 
 // cloneMap copies a config map and the containers inside it, so a composed tree
@@ -598,6 +623,9 @@ func Register[C any](registry *Registry, name string, plugin *cordis.Plugin[C]) 
 	}
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
+	if registry.plugins == nil {
+		registry.plugins = map[string]*registeredPlugin{}
+	}
 	if _, exists := registry.plugins[name]; exists {
 		return fmt.Errorf("loader: plugin %q is already registered", name)
 	}
