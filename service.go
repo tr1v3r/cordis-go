@@ -19,6 +19,13 @@ type serviceBinding struct {
 	seq int
 
 	mu sync.RWMutex
+	// panicked records that a panicking availability check was already
+	// reported. It is guarded by mu.
+	panicked bool
+
+	// log reports a panicking availability check. It lives on the binding
+	// because available() is reached from paths that hold no core reference.
+	log *loggerService
 }
 
 // getService returns the current service value.
@@ -49,6 +56,7 @@ func provide(c *Context, name string, service any,
 		service:           service,
 		availabilityCheck: availabilityCheck,
 		seq:               c.shared.nextBindingSeq(),
+		log:               c.shared.log,
 	}
 
 	// Report a dead owner as a typed error rather than panicking out of a
@@ -182,8 +190,14 @@ func (c *core) lookupService(scopeLabel, name string) *serviceBinding {
 	return binding
 }
 
+// available reports whether the binding's availability predicate currently
+// passes. A predicate that panics counts as unavailable, so a broken probe
+// hides the service instead of taking the caller down.
 func (b *serviceBinding) available() bool {
-	return b.availabilityCheck == nil || runCheck(b.availabilityCheck)
+	if b.availabilityCheck == nil {
+		return true
+	}
+	return b.runCheck()
 }
 
 // live reports whether the binding still resolves to an active provider.
@@ -191,13 +205,31 @@ func (b *serviceBinding) live() bool {
 	return b.provider != nil && b.provider.State() == StateActive && b.available()
 }
 
-func runCheck(check func() bool) (ok bool) {
+// runCheck invokes the availability predicate, converting a panic into
+// "unavailable". available() runs on every service resolution, so the panic is
+// reported once per binding instead of on every check.
+func (b *serviceBinding) runCheck() (ok bool) {
 	defer func() {
-		if recover() != nil {
+		if reason := recover(); reason != nil {
 			ok = false
+			b.reportPanic(reason)
 		}
 	}()
-	return check()
+	return b.availabilityCheck()
+}
+
+// reportPanic logs the first panic of this binding's availability predicate.
+// Later panics still count as unavailable but stay silent, so a permanently
+// broken probe cannot flood the log.
+func (b *serviceBinding) reportPanic(reason any) {
+	b.mu.Lock()
+	first := !b.panicked
+	b.panicked = true
+	b.mu.Unlock()
+	if first {
+		b.log.errorf("cordis: availability check of service %q panicked: %v",
+			b.name, reason)
+	}
 }
 
 // providedNames lists the services a fiber currently owns.
