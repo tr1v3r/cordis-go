@@ -201,12 +201,16 @@ tree.Dump(os.Stdout)
 fibers, err := tree.Load(rootCtx, registry)
 ```
 
-补丁语义与 Cordis 一致，有两点必须强调：
+补丁语义与 Cordis 一致，有三点必须强调：
 
 1. **`config` 整体替换，不深合并**。补丁里没写的字段不是"保留"，而是随整个 config 一起消失
    （除非补丁本身没写 `config`，此时保留原值）。
 2. **补丁 id 匹配不到条目时不会静默丢弃**。Cordis 的 include 插件会静默跳过，
    这是"配置为什么没生效"的经典坑；本库默认记为 `Tree.Warnings`，`loader.Strict()` 下直接报错。
+3. **层文件里的数字按字面量保留**。解析用 `json.Number`，所以 `Patch.Config` / `Node.Config` 里的
+   数字是 `json.Number` 而不是 `float64`：超过 2^53 的整数不会被静默取整，`Dump` 打印的也是文件里
+   写的那个值。交给插件的配置仍按目标字段类型解码，因此类型对不上（例如把 `{"count": 1.0}` 塞进
+   `int64` 字段）会在加载时报错，而不是被悄悄截断。
 
 `Tree.Dump()` 输出带来源标注，等价于 `dsh --profile <name> --dump-config`：
 
@@ -317,8 +321,9 @@ make ci      # CI 跑的东西：gofmt 检查 + go vet + staticcheck + revive + 
 | `make vet` | `go vet ./...` |
 | `make lint` | gofmt 检查 + `go vet` + `staticcheck` + `revive -config .revive.toml` |
 | `make test` | `go test -race ./...` |
+| `make integration` | `go test -race -count=3 ./...`，重复跑以抖出时序问题；`.github/workflows/integration.yml` 执行 |
 | `make tools` | 安装固定版本的 staticcheck / revive |
-| `make ci` | `lint` + `test`，GitHub Actions 执行同一入口 |
+| `make ci` | `lint` + `test`，`.github/workflows/ci.yml` 执行同一入口 |
 
 风格约定由 `.revive.toml` 固化（revive 默认规则集 + **100 列**行宽上限）。
 
@@ -332,16 +337,20 @@ make ci      # CI 跑的东西：gofmt 检查 + go vet + staticcheck + revive + 
 - 需要 **Go 1.27+**：事件分发、插件加载与服务访问用泛型方法（`go.mod` 的 `go 1.27.0` 即最低
   工具链要求）
 - 零第三方依赖（`go list -m all` 只有本模块），配置解码用标准库 `encoding/json`
-- `go vet` / `go test -race` 全绿。覆盖率现场量：`go test -race -cover ./...` 给出核心包 88% 出头、
-  `loader` 72.7%。这两个数字是某个 dev 基线上的量级，会随提交变化（测试数每加一个测试就变），所以
-  这里不写死计数——要当前值就直接跑那条命令。`examples/` 与 `cmd/cordis` 不在这个统计里——示例靠
-  `go run` 验证，`cmd/cordis` 的退出码契约由它自己的进程内测试钉住（`--help` / 用法错误 /
-  加载失败三档）
+- `go vet` / `go test -race` 全绿。测试分两层：单元测试与跨特性集成测试（`integration_*.go`，
+  `make integration` 以 `-race -count=3` 重复跑，独立 workflow 验证）。覆盖率现场量：
+  `go test -race -cover ./...` 给出核心包 93% 上下、`loader` 92% 上下。这两个数字只是某个 dev
+  基线上的量级，会随提交变化（加一个测试就会动），所以这里不写死——要当前值就跑那条命令。
+  `examples/` 不在统计里（示例靠 `go run` 验证）；`cmd/cordis` 的退出码契约由它自己的进程内测试
+  钉住（`--help` / 用法错误 / 加载失败三档）
 - 交叉编译验证：linux/amd64、windows/amd64、darwin/arm64
 - ⚠️ 破坏性变更：`Definition` 不再导出；`ctx.Load` / `ctx.LoadWithInject` 改为泛型方法
   `(plugin, config)`；类型化服务访问改为方法形态——`ctx.Get` / `ctx.MustGet` / `ctx.Provide` /
   `ctx.ProvideChecked` / `ctx.Serve`，无类型的 `ctx.Get(name)` 由 `ctx.Lookup(name)` 取代，
   包级 `cordis.Get` / `cordis.Provide` 等签名不变（迁移说明见「Service 与 Inject」）
+- ⚠️ 行为变更（宿主可见）：`Patch.Config` / `Node.Config` 里的数字现在是 `json.Number` 而不是
+  `float64`，超过 2^53 的整数不再被静默取整，小数进整型字段会报错；断言 `.(float64)` 的宿主需要改，
+  插件侧不受影响（见「配置驱动装配」第 3 点）
 - ⚠️ 破坏性变更：`Fiber.Disposed()` 方法已删除——判断终态改用
   `fiber.State() == cordis.StateDisposed`；`fiber.Dispose()` 只保证发起卸载，**不是**「所有
   effect 已回收」的同步点（见「Fiber」）
@@ -358,9 +367,9 @@ cordis-go/
 ├── logger.go             # 轻量日志服务
 ├── disposable.go         # 幂等 Disposer 与 effect 列表
 ├── funcforms.go          # 包级函数形态：转发到同名 Context 方法
-├── Makefile              # fmt / vet / lint / test / ci 入口
+├── Makefile              # fmt / vet / lint / test / integration / ci 入口
 ├── .revive.toml          # 风格规则：revive 默认集 + 100 列行宽
-├── .github/workflows/    # CI：Go 1.27，跑 make ci
+├── .github/workflows/    # CI：Go 1.27，ci.yml 跑 make ci，integration.yml 跑 make integration
 ├── loader/               # 配置驱动装配、patch 层、config dump
 ├── cmd/cordis/           # 配置 dump 命令行工具
 └── examples/
