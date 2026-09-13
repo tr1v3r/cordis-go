@@ -571,12 +571,14 @@ func (f *Fiber) load(bindings map[string]*serviceBinding) {
 	if !f.setState(StateLoading) {
 		return
 	}
+	// Don't run the body against a provider disposed after resolution. Defense,
+	// not correctness: later deaths go through unload's unregister+notify,
+	// which marks a rerun; the check stays because it is cheap.
 	for _, binding := range bindings {
 		if binding.live() {
 			continue
 		}
-		// A provider vanished while the load was being prepared. Ask the
-		// refresh owner to re-evaluate before running the plugin body.
+		// Record the rerun; drive re-resolves on the next pass.
 		f.refresh()
 		return
 	}
