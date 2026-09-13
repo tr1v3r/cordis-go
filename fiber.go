@@ -512,23 +512,10 @@ func (f *Fiber) reload() {
 		return
 	}
 	f.epoch = epoch
-	hasEffects := f.hasEffects
 	f.mu.Unlock()
 
-	// reload unloaded above, so this is a defensive re-check before loading a
-	// new generation over live effects.
-	if hasEffects {
-		f.unload()
-
-		f.mu.Lock()
-		disposed := f.disposed
-		f.mu.Unlock()
-		if disposed {
-			f.unload()
-			return
-		}
-	}
-
+	// reload unloaded the previous generation at entry, so the fiber is clean
+	// here. load re-checks disposed before it starts the new body.
 	f.load(bindings)
 }
 
