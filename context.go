@@ -222,7 +222,7 @@ func (c *Context) Lookup(name string) (any, bool) {
 	if binding == nil {
 		return nil, false
 	}
-	return binding.service, true
+	return binding.getService(), true
 }
 
 // resolveService mirrors Cordis's context proxy lookup: walk the owning fiber's
@@ -262,7 +262,7 @@ func (c *Context) Get[T any](name string) (T, bool) {
 	if binding == nil {
 		return zero, false
 	}
-	service, ok := binding.service.(T)
+	service, ok := binding.getService().(T)
 	if !ok {
 		return zero, false
 	}

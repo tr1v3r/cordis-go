@@ -219,7 +219,7 @@ func (f *Fiber) Store() map[string]any {
 	defer f.mu.Unlock()
 	services := make(map[string]any, len(f.resolvedServices))
 	for name, binding := range f.resolvedServices {
-		services[name] = binding.service
+		services[name] = binding.getService()
 	}
 	return services
 }

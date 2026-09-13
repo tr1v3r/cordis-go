@@ -1,6 +1,9 @@
 package cordis
 
-import "fmt"
+import (
+	"fmt"
+	"sync"
+)
 
 // serviceBinding associates a service name and scope with its provider and
 // concrete service object.
@@ -10,6 +13,22 @@ type serviceBinding struct {
 	provider          *Fiber
 	service           any
 	availabilityCheck func() bool
+
+	mu sync.RWMutex
+}
+
+// getService returns the current service value.
+func (b *serviceBinding) getService() any {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.service
+}
+
+// setService replaces the current service value.
+func (b *serviceBinding) setService(service any) {
+	b.mu.Lock()
+	b.service = service
+	b.mu.Unlock()
 }
 
 func provide(c *Context, name string, service any,
@@ -78,9 +97,7 @@ func setService(c *Context, name string, service any) error {
 	if binding.provider != c.fiber {
 		return newError(ErrServiceOwnership, "cannot set service %q from another fiber", name)
 	}
-	c.shared.mu.Lock()
-	binding.service = service
-	c.shared.mu.Unlock()
+	binding.setService(service)
 	c.shared.notify(name, scopeLabel)
 	return nil
 }
@@ -130,8 +147,8 @@ func (c *core) lookupService(scopeLabel string) *serviceBinding {
 	return binding
 }
 
-func (binding *serviceBinding) available() bool {
-	return binding.availabilityCheck == nil || runCheck(binding.availabilityCheck)
+func (b *serviceBinding) available() bool {
+	return b.availabilityCheck == nil || runCheck(b.availabilityCheck)
 }
 
 func runCheck(check func() bool) (ok bool) {
