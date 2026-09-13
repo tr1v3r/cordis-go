@@ -79,15 +79,13 @@ func New(opts ...Option) *Context {
 
 	// Built-in services are ordinary services: plugins may inject them by name
 	// and they disappear with the root fiber like any other effect.
-	if _, err := Provide[Registry](rootCtx, "registry", appCore.registryFacade()); err != nil {
+	if _, err := rootCtx.Provide("registry", appCore.registryFacade()); err != nil {
 		panic(err)
 	}
-	if _, err := Provide[*EventService](rootCtx, "events",
-		&EventService{ctx: rootCtx}); err != nil {
+	if _, err := rootCtx.Provide("events", &EventService{ctx: rootCtx}); err != nil {
 		panic(err)
 	}
-	if _, err := Provide[*LoggerService](rootCtx, "logger",
-		&LoggerService{svc: appCore.log}); err != nil {
+	if _, err := rootCtx.Provide("logger", &LoggerService{svc: appCore.log}); err != nil {
 		panic(err)
 	}
 
@@ -211,19 +209,8 @@ func (c *Context) Logger(name ...string) *Logger {
 	return &Logger{name: label, svc: c.shared.log}
 }
 
-// Provide registers a service under name, owned by this context's fiber.
-func (c *Context) Provide(name string, service any) (Disposer, error) {
-	return provide(c, name, service, nil)
-}
-
-// ProvideChecked registers a service together with an availability predicate.
-// While availabilityCheck returns false, dependents treat the service as missing.
-func (c *Context) ProvideChecked(name string, service any,
-	availabilityCheck func() bool) (Disposer, error) {
-	return provide(c, name, service, availabilityCheck)
-}
-
-// Set replaces a service this context's fiber owns.
+// Set replaces a service this context's fiber owns. Like Lookup it is untyped:
+// the name is the only thing a runtime host knows about the service.
 func (c *Context) Set(name string, service any) error {
 	return setService(c, name, service)
 }
@@ -266,12 +253,10 @@ func (c *Context) resolveService(name string) *serviceBinding {
 	return c.shared.lookupService(scopeLabel)
 }
 
-// Get reads a service as an untyped value.
-func (c *Context) Get(name string) (any, bool) { return c.Lookup(name) }
-
 // Get reads a service with a type assertion. It reports false when the service
-// is missing, its provider is inactive, or the service has another type.
-func Get[T any](c *Context, name string) (T, bool) {
+// is missing, its provider is inactive, or the service has another type. A host
+// that only holds the service name at runtime reads it with Lookup instead.
+func (c *Context) Get[T any](name string) (T, bool) {
 	var zero T
 	binding := c.resolveService(name)
 	if binding == nil {
@@ -287,8 +272,8 @@ func Get[T any](c *Context, name string) (T, bool) {
 // MustGet reads a required service by name and panics with a diagnostic when it
 // is unavailable. Inside a plugin, prefer declaring the dependency in Inject so
 // the plugin waits instead of failing.
-func MustGet[T any](c *Context, name string) T {
-	service, ok := Get[T](c, name)
+func (c *Context) MustGet[T any](name string) T {
+	service, ok := c.Get[T](name)
 	if !ok {
 		panic(newError(ErrServiceMissing, "required service %q is not available in context %q",
 			name, c.name))
@@ -296,13 +281,16 @@ func MustGet[T any](c *Context, name string) T {
 	return service
 }
 
-// Provide registers a typed service owned by c's fiber.
-func Provide[T any](c *Context, name string, service T) (Disposer, error) {
+// Provide registers a service owned by c's fiber. The type parameter is
+// inferred from service, so a caller that holds the service as an any value
+// registers it without naming a type.
+func (c *Context) Provide[T any](name string, service T) (Disposer, error) {
 	return provide(c, name, service, nil)
 }
 
-// ProvideChecked registers a typed service with an availability predicate.
-func ProvideChecked[T any](c *Context, name string, service T,
+// ProvideChecked registers a service together with an availability predicate.
+// While availabilityCheck returns false, dependents treat the service as missing.
+func (c *Context) ProvideChecked[T any](name string, service T,
 	availabilityCheck func() bool) (Disposer, error) {
 	return provide(c, name, service, availabilityCheck)
 }
@@ -311,7 +299,7 @@ func ProvideChecked[T any](c *Context, name string, service T,
 // registration; a failed Start rolls the registration back. On dispose it calls
 // Stop (if implemented) before unregistering, because Stop is registered later
 // and disposers run in reverse order.
-func Serve[T any](c *Context, name string, service T) (T, error) {
+func (c *Context) Serve[T any](name string, service T) (T, error) {
 	disposer, err := provide(c, name, service, nil)
 	if err != nil {
 		return service, err

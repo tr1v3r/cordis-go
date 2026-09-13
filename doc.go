@@ -7,16 +7,16 @@
 // JavaScript-specific machinery with Go idioms:
 //
 //   - Dynamic property access (ctx.foo) becomes explicit, type-safe lookups:
-//     cordis.Get[*DB](ctx, "db").
+//     ctx.Get[*DB]("db").
 //   - Plugin shapes (function / class / { apply }) become *cordis.Plugin[C]
 //     values with a typed config.
-//   - Generic entry points — loading a plugin, registering a listener and
-//     dispatching an event — are methods on Context, each with an
-//     interchangeable package-level function form that takes the context first,
-//     for callers that must pass the helper as a value. Type-parameterised
-//     lookup (Get[T], Provide[T]) stays package-level, because Context already
-//     uses those method names for their untyped forms: a method set holds one
-//     method per name.
+//   - Generic entry points — loading a plugin, registering a listener,
+//     dispatching an event and reading a service by type — are methods on
+//     Context, each with an interchangeable package-level function form that
+//     takes the context first, for callers that must pass the helper as a
+//     value. A host that knows only a service name at runtime reads it with
+//     Lookup and replaces its own registration with Set: those two stay untyped,
+//     because the type parameter is exactly what such a host cannot supply.
 //   - Promises become synchronous calls; goroutines are cancelled through the
 //     context.Context returned by Context.Context.
 //   - Module hot replacement (import()) has no in-process equivalent in Go, so

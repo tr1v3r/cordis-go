@@ -53,7 +53,7 @@ func main() {
 	loader.MustRegister(registry, "database-module",
 		cordis.Define("database-provider", func(ctx *cordis.Context, cfg dbConfig) error {
 			database := &DB{path: cfg.Path}
-			if _, err := cordis.Serve(ctx, "db", database); err != nil {
+			if _, err := ctx.Serve("db", database); err != nil {
 				return err
 			}
 			ctx.Logger().Info("db ready at %s", cfg.Path)
@@ -64,12 +64,12 @@ func main() {
 		cordis.Define("http-server", func(ctx *cordis.Context, cfg serverConfig) error {
 			// The db dependency is declared below via WithInject, so this plugin only
 			// runs once the db service exists.
-			database, ok := cordis.Get[*DB](ctx, "db")
+			database, ok := ctx.Get[*DB]("db")
 			if !ok {
 				return fmt.Errorf("db service unavailable")
 			}
 			server := &Server{addr: cfg.Addr}
-			if _, err := cordis.Serve(ctx, "server", server); err != nil {
+			if _, err := ctx.Serve("server", server); err != nil {
 				return err
 			}
 			ctx.On("ping", func(ping *Ping) {
@@ -110,14 +110,14 @@ func main() {
 		}).WithInject("cache"), struct{}{})
 	must(err)
 	fmt.Printf("fiber %-14s state=%s\n", cacheConsumerFiber.Name(), cacheConsumerFiber.State())
-	if _, err := cordis.Provide[*DB](rootCtx, "cache", &DB{path: "cache.db"}); err != nil {
+	if _, err := rootCtx.Provide("cache", &DB{path: "cache.db"}); err != nil {
 		must(err)
 	}
 	fmt.Printf("fiber %-14s state=%s\n", cacheConsumerFiber.Name(), cacheConsumerFiber.State())
 
 	fmt.Println("== dispose ==")
 	rootCtx.Fiber().Dispose()
-	_, alive := cordis.Get[*Server](rootCtx, "server")
+	_, alive := rootCtx.Get[*Server]("server")
 	fmt.Printf("server service still available: %v\n", alive)
 }
 

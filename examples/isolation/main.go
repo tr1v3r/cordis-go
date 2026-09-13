@@ -22,13 +22,13 @@ type consumerConfig struct {
 
 var databasePlugin = cordis.Define("database-provider",
 	func(ctx *cordis.Context, cfg databaseConfig) error {
-		_, err := cordis.Provide(ctx, "db", &database{label: cfg.Label})
+		_, err := ctx.Provide("db", &database{label: cfg.Label})
 		return err
 	})
 
 var consumerPlugin = cordis.Define("database-consumer",
 	func(ctx *cordis.Context, cfg consumerConfig) error {
-		db, ok := cordis.Get[*database](ctx, "db")
+		db, ok := ctx.Get[*database]("db")
 		if !ok {
 			return fmt.Errorf("db service unavailable")
 		}
@@ -84,7 +84,7 @@ func mustLoad[C any](ctx *cordis.Context, plugin *cordis.Plugin[C], config C) *c
 }
 
 func printResolvedDB(label string, ctx *cordis.Context) {
-	db, ok := cordis.Get[*database](ctx, "db")
+	db, ok := ctx.Get[*database]("db")
 	if !ok {
 		panic("db service unavailable")
 	}

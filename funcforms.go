@@ -80,6 +80,32 @@ func WaterfallScoped[E any](c *Context, scopeName, name string, payload E, final
 	return c.WaterfallScoped(scopeName, name, payload, final)
 }
 
+// Get is the function form of Context.Get.
+func Get[T any](c *Context, name string) (T, bool) {
+	return c.Get[T](name)
+}
+
+// MustGet is the function form of Context.MustGet.
+func MustGet[T any](c *Context, name string) T {
+	return c.MustGet[T](name)
+}
+
+// Provide is the function form of Context.Provide.
+func Provide[T any](c *Context, name string, service T) (Disposer, error) {
+	return c.Provide(name, service)
+}
+
+// ProvideChecked is the function form of Context.ProvideChecked.
+func ProvideChecked[T any](c *Context, name string, service T,
+	availabilityCheck func() bool) (Disposer, error) {
+	return c.ProvideChecked(name, service, availabilityCheck)
+}
+
+// Serve is the function form of Context.Serve.
+func Serve[T any](c *Context, name string, service T) (T, error) {
+	return c.Serve(name, service)
+}
+
 // Load is the function form of Context.Load.
 func Load[C any](parentCtx *Context, plugin *Plugin[C], config C) (*Fiber, error) {
 	return parentCtx.Load(plugin, config)

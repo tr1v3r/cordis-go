@@ -11,8 +11,8 @@ make ci      # 改完必须绿：gofmt 检查 + vet + staticcheck + revive + go 
 make fmt     # 也可以单跑某一环：make fmt / vet / lint / test
 ```
 
-**需要 Go 1.27+**（`go.mod` 声明 `go 1.27.0`）：事件分发与插件加载是泛型方法，属于 1.27 的
-语言特性。
+**需要 Go 1.27+**（`go.mod` 声明 `go 1.27.0`）：事件分发、插件加载与服务访问是泛型方法，属于
+1.27 的语言特性。
 
 三个会骗人的坑：
 
@@ -28,12 +28,13 @@ make fmt     # 也可以单跑某一环：make fmt / vet / lint / test
 - **擦除边界**：`registry.go` 的 `definition` 是**非导出**接口，fiber 靠它在不认识配置类型的前提下
   调用 `ResolveConfig` / `Run`。不要重新导出它——`Definition` 已经删除（见 README 破坏性变更）。
 - **泛型入口成对出现**：Context 方法 + 等价包级函数（`ctx.Emit` / `cordis.Emit`、`ctx.Load` /
-  `cordis.Load`）。包级形态集中在 `funcforms.go`，它们存在的理由是能把助手当成
-  `func(*Context, ...)` 传递——方法值（`ctx.Emit[T]`）已经把接收者绑进去了，类型里没有 ctx。
-  上游 TS 只有方法形态，所以这是 Go 侧的补充；完整约定写在 `doc.go`。
-- **这些名字没有方法形态**：`Get[T]` / `Provide[T]` / `ProvideChecked[T]`。原因是 `Context` 上
-  同名**非泛型**方法已存在（运行期按名字取服务是刚需），而 Go 不允许泛型方法与非泛型方法同名
-  ——方法集一个名字只能有一个方法。给某个操作加方法形态前，先确认 `Context` 上没有同名方法。
+  `cordis.Load`、`ctx.Get` / `cordis.Get`）。包级形态集中在 `funcforms.go`，它们存在的理由是能把
+  助手当成 `func(*Context, ...)` 传递——方法值（`ctx.Emit[T]`）已经把接收者绑进去了，类型里没有
+  ctx。上游 TS 只有方法形态，所以这是 Go 侧的补充；完整约定写在 `doc.go`。
+- **一个名字只能有一个方法**：服务族全部是泛型方法（`ctx.Get` / `ctx.MustGet` / `ctx.Provide` /
+  `ctx.ProvideChecked` / `ctx.Serve`），运行期按名字访问因此只能占用别的名字——无类型读取是
+  `ctx.Lookup`，改写自有服务是 `ctx.Set`。别再给 `Context` 加无类型的 `Get` / `Provide`：那会和
+  泛型方法撞名，整个包编译不过。
 - **运行期才知道插件类型的宿主**（参考 `loader`）：在**注册时**用闭包固定类型参数
   （`Register[C]` 里把 `load` 闭包建好），运行期只调那个闭包。不要在加载时尝试擦除类型。
 - **同一 definition 加载两次 = 一个 runtime、两个 fiber**：`runtime` 按 definition 指针身份索引，
@@ -58,7 +59,7 @@ make fmt     # 也可以单跑某一环：make fmt / vet / lint / test
 | --- | --- |
 | 加一种事件分发模式 | `events.go`（方法 + `*Scoped` 变体）+ `funcforms.go` 的等价转发，同步 `doc.go` 的约定段、`examples/events`、以及方法/函数形态的对拍测试 |
 | 改包级转发形态 | `funcforms.go`——方法本体留在各自文件里，这里只放转发 |
-| 改公开 API 形态 | 先读 `doc.go` 的泛型约定，再确认 `Context` 上没有同名非泛型方法 |
+| 改公开 API 形态 | 先读 `doc.go` 的泛型约定：泛型入口一律「方法 + `funcforms.go` 的包级孪生」，运行期按名字的无类型形态走 `Lookup` / `Set` |
 | 加示例 | `examples/<名字>/main.go`，同步 README 的运行节与目录树，并保证能直接 `go run` |
 | 改配置装配 | `loader/loader.go`——`Register[C]` 的注册期擦除是关键 |
 | 调 lint 规则 | `.revive.toml`；规则选项语法是 `arguments = [...]` 而不是 `max = ...`（写错会静默退回默认 80 列） |

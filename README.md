@@ -14,7 +14,7 @@ plugin := cordis.Define[dbConfig]("db", func(ctx *cordis.Context, cfg dbConfig) 
         return err
     }
     ctx.OnDispose(func() { db.Close() }) // 卸载时自动回收
-    _, err = cordis.Provide(ctx, "db", db)
+    _, err = ctx.Provide("db", db)
     return err
 })
 
@@ -34,10 +34,10 @@ fiber, err := rootCtx.Load(plugin, dbConfig{Path: "app.db"})
 
 | Cordis (TypeScript) | cordis-go | 说明 |
 | --- | --- | --- |
-| `ctx.foo` | `cordis.Get[*Foo](ctx, "foo")` | Go 没有 Proxy，改为显式、类型安全的查找 |
+| `ctx.foo` | `ctx.Get[*Foo]("foo")` | Go 没有 Proxy，改为显式、类型安全的查找 |
 | `ctx.plugin(p, cfg)` | `ctx.Load(p, cfg)` | 返回 `*Fiber`；同一个 plugin 加载两次 = 两个 fiber |
 | `ctx.inject(deps, cb)` | `cordis.Inject(ctx, deps, cb)` | 依赖就绪前挂起，变更时自动重载 |
-| `ctx.provide(name, v)` | `cordis.Provide[T](ctx, name, v)` | 返回 `(Disposer, error)`，所有权属于当前 fiber |
+| `ctx.provide(name, v)` | `ctx.Provide(name, v)` | 类型参数从 `v` 推断；返回 `(Disposer, error)`，所有权属于当前 fiber |
 | `ctx.effect(fn)` | `ctx.Effect(label, body)` | 可逆副作用 |
 | `ctx.on / emit / bail / waterfall` | `ctx.On` / `ctx.Emit` / `ctx.Bail` / `ctx.Waterfall` | 泛型事件，payload 类型在编译期确定；注册与分发都是 Context 方法，包级同名函数是等价形态 |
 | `ctx.isolate(name)` | `ctx.Isolate(name)` / `ctx.IsolateShared(name, label)` | 服务隔离，同名服务互不冲突；同一 label 可让两个作用域合并 |
@@ -114,21 +114,26 @@ Cordis 的一切副作用都通过 `ctx` 注册，因此卸载时可以精确回
 ```go
 rootCtx := cordis.New()
 consumer := cordis.Define[struct{}]("consumer", func(ctx *cordis.Context, _ struct{}) error {
-    db, _ := cordis.Get[*DB](ctx, "db") // 到这里 db 一定可用
+    db, _ := ctx.Get[*DB]("db") // 到这里 db 一定可用
     return nil
 }).WithInject("db")
 
 fiber, _ := rootCtx.Load(consumer, struct{}{})
 // fiber.State() == StatePending —— 还没人提供 db
 
-dispose, _ := cordis.Provide[*DB](rootCtx, "db", newDB())
+dispose, _ := rootCtx.Provide("db", newDB())
 // fiber.State() == StateActive —— 自动激活
 
 dispose()
 // 回到 pending；再提供新实现会重新加载
 ```
 
-`Serve[T]` 是常用封装：注册服务，并在实例实现 `Start()` / `Stop()` 时自动调用。
+`ctx.Serve` 是常用封装：注册服务，并在实例实现 `Start()` / `Stop()` 时自动调用。
+
+服务族都是类型化方法：`ctx.Get[*DB]("db")`；`ctx.Provide("db", db)` 的类型参数从服务值推断，
+所以既有调用点不用改，只持有 `any` 的宿主直接写 `ctx.Provide("db", svcAny)`（T 推断为 `any`）。
+**只知道服务名字**的宿主用无类型的 `ctx.Lookup(name)` / `ctx.Set(name, svc)`：Go 的方法集一个
+名字只能有一个方法，这两个名字因此留给无类型形态。
 
 ### 5. Event — 带作用域过滤的事件总线
 
@@ -147,12 +152,8 @@ cordis.On(rootCtx, "tick", func(t Tick) { ... })  // 等价函数形态，行为
 ```
 
 每个方法都有等价的包级函数（首参为 context），用于必须把助手当作值传递的场合——泛型方法要
-先实例化才能取方法值；`ctx.Load` / `ctx.LoadWithInject` 遵循同一规则。
-
-唯一的例外是**服务查找**：`Get[T]` / `Provide[T]` / `ProvideChecked[T]` 只能留在包级，因为
-`Context` 上同名的**非泛型**方法（`Get(name) (any, bool)`、`Provide(name, any)` 等）删不得——
-运行期按名字取用服务是刚需，inject 键就是配置里的字符串，而 Go 不允许泛型方法与非泛型方法
-同名。
+先实例化才能取方法值；`ctx.Load` / `ctx.LoadWithInject` 与服务族（`ctx.Get` / `ctx.MustGet` /
+`ctx.Provide` / `ctx.ProvideChecked` / `ctx.Serve`）都遵循同一规则。
 
 ## 配置驱动装配（loader）
 
@@ -221,12 +222,12 @@ epoch 重载、隔离作用域、事件分发五种模式、作用域过滤、�
 
 | 项 | 说明 |
 | --- | --- |
-| 动态属性 `ctx.foo` | Go 无 Proxy，改为 `cordis.Get[T]`。代价是失去语法糖，收益是编译期可查、可静态分析依赖 |
+| 动态属性 `ctx.foo` | Go 无 Proxy，改为 `ctx.Get[T]`。代价是失去语法糖，收益是编译期可查、可静态分析依赖 |
 | 模块热替换（HMR） | **Go 无法在进程内卸载已加载的代码**。本库只做「配置热重载 + 插件生命周期重载」；真正的热插拔请把插件放进 WASM（wazero）或子进程（go-plugin） |
 | `Promise` / 异步 effect | 全部同步执行。异步资源用 `ctx.Context()` 取消，用 goroutine 承载 |
 | schemastery 校验 | 用 Go 结构体 + `WithValidate`，配置从 JSON 解码 |
 | `intercept` / `accessor` / `mixin` | 未实现：三者都是围绕 Proxy 的机制，在静态类型语言里没有对应物 |
-| `Service` 基类 / `@Inject` 装饰器 | 用 `cordis.Serve` + `WithInject` 代替 |
+| `Service` 基类 / `@Inject` 装饰器 | 用 `ctx.Serve` + `WithInject` 代替 |
 | 事件的 `this` 绑定 | Go 没有 `this`，需要时把上下文作为 payload 字段传入 |
 
 ### loader 的已知限制
@@ -288,12 +289,15 @@ make ci      # CI 跑的东西：gofmt 检查 + go vet + staticcheck + revive + 
 
 ## 状态
 
-- 需要 **Go 1.27+**：事件分发与插件加载用泛型方法（`go.mod` 的 `go 1.27.0` 即最低工具链要求）
+- 需要 **Go 1.27+**：事件分发、插件加载与服务访问用泛型方法（`go.mod` 的 `go 1.27.0` 即最低
+  工具链要求）
 - 零第三方依赖（`go list -m all` 只有本模块），配置解码用标准库 `encoding/json`
-- `go vet` / `go test -race` 全绿；57 个测试，核心包覆盖率 87.0%，loader 72.7%
+- `go vet` / `go test -race` 全绿；64 个测试，核心包覆盖率 87.8%，loader 72.7%
 - 交叉编译验证：linux/amd64、windows/amd64、darwin/arm64
 - ⚠️ 破坏性变更：`Definition` 不再导出；`ctx.Load` / `ctx.LoadWithInject` 改为泛型方法
-  `(plugin, config)`，包级 `cordis.Load` 签名不变（迁移方式见开头的加载说明）
+  `(plugin, config)`；类型化服务访问改为方法形态——`ctx.Get` / `ctx.MustGet` / `ctx.Provide` /
+  `ctx.ProvideChecked` / `ctx.Serve`，无类型的 `ctx.Get(name)` 由 `ctx.Lookup(name)` 取代，
+  包级 `cordis.Get` / `cordis.Provide` 等签名不变（迁移说明见「Service 与 Inject」）
 
 ## 目录结构
 
