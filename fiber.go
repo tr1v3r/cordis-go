@@ -97,8 +97,8 @@ type StatusEvent struct {
 	Old   FiberState
 }
 
-// PluginEvent is emitted as "internal/plugin" when a fiber is created or
-// disposed.
+// PluginEvent is emitted as "internal/plugin" when a fiber is created and when
+// its disposal starts, before effects are unwound.
 type PluginEvent struct {
 	Fiber *Fiber
 }
