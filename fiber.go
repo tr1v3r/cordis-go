@@ -80,9 +80,13 @@ type Fiber struct {
 	dirty            bool
 	forceReload      bool
 	disposed         bool
-	hasEffects       bool
-	root             bool
-	current          *effectEntry
+
+	// live marks a generation claimed by load and not yet released by unload.
+	// It is set before the body runs and cleared before disposers run, so it
+	// stays true for an active fiber even when it registered no effects.
+	live    bool
+	root    bool
+	current *effectEntry
 
 	done                 chan struct{}
 	lifecycleCtx         context.Context
@@ -119,7 +123,7 @@ func newRootFiber(ctx *Context) *Fiber {
 		root:             true,
 		resolvedServices: map[string]*serviceBinding{},
 		effects:          newDisposableList(),
-		hasEffects:       true,
+		live:             true,
 		done:             make(chan struct{}),
 		lifecycleCtx:     lifecycleCtx,
 		cancel:           cancel,
@@ -137,7 +141,6 @@ func newFiber(parentCtx *Context, runtime *runtime, cfg any,
 		state:        StatePending,
 		epoch:        epochInactive,
 		effects:      newDisposableList(),
-		hasEffects:   false,
 		done:         make(chan struct{}),
 		lifecycleCtx: lifecycleCtx,
 		cancel:       cancel,
@@ -387,7 +390,7 @@ func (f *Fiber) sync() {
 	// based on a single observed state.
 	f.mu.Lock()
 	same := epoch == f.epoch
-	hasEffects := f.hasEffects
+	live := f.live
 	f.mu.Unlock()
 
 	switch {
@@ -397,7 +400,7 @@ func (f *Fiber) sync() {
 	case epoch == epochInactive:
 		// Dependencies are gone; release the current generation.
 		f.applyUnload()
-	case hasEffects:
+	case live:
 		// A new generation is available, but the old one is still live.
 		// reload unloads it first and resolves the new world afterwards.
 		f.reload()
@@ -493,7 +496,7 @@ func (f *Fiber) load(bindings map[string]*serviceBinding) {
 		f.mu.Unlock()
 		return
 	}
-	f.hasEffects = true
+	f.live = true
 	f.mu.Unlock()
 	if !f.setState(StateLoading) {
 		return
@@ -570,8 +573,8 @@ func (f *Fiber) fail(err error) {
 // finishes through finalizeDispose, otherwise it returns to pending.
 func (f *Fiber) unload() {
 	f.mu.Lock()
-	if f.hasEffects {
-		f.hasEffects = false
+	if f.live {
+		f.live = false
 		f.mu.Unlock()
 	} else {
 		disposed := f.disposed
