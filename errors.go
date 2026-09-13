@@ -37,9 +37,14 @@ func (e *Error) Error() string {
 }
 
 // Is reports whether target carries the same code.
+//
+// A nil *Error never matches, on either side of the comparison: errors.Is hands
+// the target straight to this method and does not recover, so a caller that
+// leaves an optional target unset, or that compares a nil error, must get "no
+// match" instead of a panic.
 func (e *Error) Is(target error) bool {
 	other, ok := target.(*Error)
-	return ok && other.Code == e.Code
+	return e != nil && ok && other != nil && other.Code == e.Code
 }
 
 func newError(code ErrorCode, format string, args ...any) *Error {
