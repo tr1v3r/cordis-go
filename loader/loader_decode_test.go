@@ -2,6 +2,7 @@ package loader_test
 
 import (
 	"encoding/json"
+	"errors"
 	"testing"
 
 	cordis "github.com/tr1v3r/cordis-go"
@@ -142,6 +143,102 @@ func TestLoadLeavesAbsentConfigAtItsZeroValue(t *testing.T) {
 		})
 		if got.Mode != "" {
 			t.Fatalf("want the zero value for a null config, got mode %q", got.Mode)
+		}
+	})
+}
+
+// validatingConfig rejects an empty mode, so its UnmarshalJSON doubles as
+// validation: it only runs when the decode path really hands the config over.
+type validatingConfig struct {
+	Mode string `json:"mode"`
+}
+
+func (c *validatingConfig) UnmarshalJSON(data []byte) error {
+	type plain validatingConfig
+	var decoded plain
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	if decoded.Mode == "" {
+		return errors.New("mode must not be empty")
+	}
+	*c = validatingConfig(decoded)
+	return nil
+}
+
+// TestLoadFailsWhenUnmarshalJSONRejectsAnEmptyConfigObject pins the loud side
+// of the empty-object decode: an empty object is a real decode, so a target
+// type that rejects it must fail the load - the old short circuit made the
+// rejection silently disappear. An absent config never reaches the type, so it
+// still loads.
+func TestLoadFailsWhenUnmarshalJSONRejectsAnEmptyConfigObject(t *testing.T) {
+	t.Run("empty object", func(t *testing.T) {
+		layer := loader.Layer{Label: "base", Entries: []*loader.Patch{{
+			ID: "entry", Name: strptr("defaults"), Config: map[string]any{},
+		}}}
+		tree, err := loader.Compose([]loader.Layer{layer})
+		if err != nil {
+			t.Fatal(err)
+		}
+		registry := loader.NewRegistry()
+		loader.MustRegister(registry, "defaults",
+			cordis.Define[validatingConfig]("defaults",
+				func(_ *cordis.Context, _ validatingConfig) error { return nil }))
+		if _, err := tree.Load(cordis.New(), registry); err == nil {
+			t.Fatal("want an error: the target type must see the empty object")
+		}
+	})
+
+	t.Run("absent", func(t *testing.T) {
+		layer := loader.Layer{Label: "base", Entries: []*loader.Patch{{
+			ID: "entry", Name: strptr("defaults"),
+		}}}
+		tree, err := loader.Compose([]loader.Layer{layer})
+		if err != nil {
+			t.Fatal(err)
+		}
+		registry := loader.NewRegistry()
+		loader.MustRegister(registry, "defaults",
+			cordis.Define[validatingConfig]("defaults",
+				func(_ *cordis.Context, _ validatingConfig) error { return nil }))
+		if _, err := tree.Load(cordis.New(), registry); err != nil {
+			t.Fatalf("want an absent config to load, got %v", err)
+		}
+	})
+}
+
+// TestLoadPointerConfigStaysNilWithoutAConfigObject completes the pointer
+// matrix: a pointer config is allocated for an empty object but stays nil when
+// the entry declares no config at all, because nil and empty are different
+// declarations.
+func TestLoadPointerConfigStaysNilWithoutAConfigObject(t *testing.T) {
+	t.Run("absent", func(t *testing.T) {
+		var got *defaultsConfig
+		loadDefaultsEntry(t, nil, func(config *defaultsConfig) {
+			got = config
+		})
+		if got != nil {
+			t.Fatalf("want a nil config for an absent config, got %+v", got)
+		}
+	})
+
+	t.Run("null", func(t *testing.T) {
+		layer, err := loader.ParseLayer("file", []byte(`[
+		  {"id": "entry", "name": "defaults", "config": null}
+		]`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		tree, err := loader.Compose([]loader.Layer{layer})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got *defaultsConfig
+		loadDefaultsTree(t, tree, func(config *defaultsConfig) {
+			got = config
+		})
+		if got != nil {
+			t.Fatalf("want a nil config for a null config, got %+v", got)
 		}
 	})
 }
