@@ -368,15 +368,12 @@ const (
 )
 
 // sync reconciles one fiber with its pending requests and current dependencies.
-func (f *Fiber) sync() {
-	action, resolved, epoch := f.plan()
-	f.apply(action, resolved, epoch)
-}
+func (f *Fiber) sync() { f.apply(f.plan()) }
 
 // plan consumes pending requests and selects the next transition without
-// mutating lifecycle state beyond clearing forceReload. resolved and epoch are
+// mutating lifecycle state beyond clearing forceReload. bindings and epoch are
 // only meaningful for actions that run a load generation.
-func (f *Fiber) plan() (fiberAction, map[string]*serviceBinding, string) {
+func (f *Fiber) plan() (action fiberAction, bindings map[string]*serviceBinding, epoch string) {
 	if f.root || f.runtime == nil {
 		return actionNoop, nil, ""
 	}
@@ -389,7 +386,7 @@ func (f *Fiber) plan() (fiberAction, map[string]*serviceBinding, string) {
 		return actionReload, nil, ""
 	}
 
-	resolved, epoch := f.resolveInjections()
+	bindings, epoch = f.resolveInjections()
 
 	f.mu.Lock()
 	same := epoch == f.epoch
@@ -403,14 +400,14 @@ func (f *Fiber) plan() (fiberAction, map[string]*serviceBinding, string) {
 		return actionUnload, nil, ""
 	}
 	if cleaned {
-		return actionLoad, resolved, epoch
+		return actionLoad, bindings, epoch
 	}
-	return actionCycle, resolved, epoch
+	return actionCycle, bindings, epoch
 }
 
 // apply executes a planned transition. User callbacks may run here, so f.mu is
 // never held across load or unload.
-func (f *Fiber) apply(action fiberAction, resolved map[string]*serviceBinding,
+func (f *Fiber) apply(action fiberAction, bindings map[string]*serviceBinding,
 	epoch string) {
 	switch action {
 	case actionNoop:
@@ -420,9 +417,9 @@ func (f *Fiber) apply(action fiberAction, resolved map[string]*serviceBinding,
 	case actionDispose:
 		f.unload()
 	case actionLoad:
-		f.applyLoad(resolved, epoch)
+		f.applyLoad(bindings, epoch)
 	case actionCycle:
-		f.applyCycle(resolved, epoch)
+		f.applyCycle(bindings, epoch)
 	case actionReload:
 		f.reload()
 	}
@@ -443,7 +440,7 @@ func (f *Fiber) applyUnload() {
 
 // applyLoad commits the planned epoch and runs the plugin body on a clean
 // fiber.
-func (f *Fiber) applyLoad(resolved map[string]*serviceBinding, epoch string) {
+func (f *Fiber) applyLoad(bindings map[string]*serviceBinding, epoch string) {
 	f.mu.Lock()
 	if f.disposed {
 		f.mu.Unlock()
@@ -452,12 +449,12 @@ func (f *Fiber) applyLoad(resolved map[string]*serviceBinding, epoch string) {
 	}
 	f.epoch = epoch
 	f.mu.Unlock()
-	f.load(resolved)
+	f.load(bindings)
 }
 
 // applyCycle unloads the previous generation, commits the planned epoch, and
 // loads the new generation.
-func (f *Fiber) applyCycle(resolved map[string]*serviceBinding, epoch string) {
+func (f *Fiber) applyCycle(bindings map[string]*serviceBinding, epoch string) {
 	f.mu.Lock()
 	if f.disposed {
 		f.mu.Unlock()
@@ -476,7 +473,7 @@ func (f *Fiber) applyCycle(resolved map[string]*serviceBinding, epoch string) {
 		f.unload()
 		return
 	}
-	f.load(resolved)
+	f.load(bindings)
 }
 
 // reload forces an unload/reload cycle for Restart and Update. It resets the
@@ -500,7 +497,7 @@ func (f *Fiber) reload() {
 // reconcile resolves the current dependency epoch and drives the load/unload
 // tail shared by sync and reload.
 func (f *Fiber) reconcile() {
-	resolved, epoch := f.resolveInjections()
+	bindings, epoch := f.resolveInjections()
 
 	f.mu.Lock()
 	if f.disposed || epoch == f.epoch {
@@ -516,7 +513,7 @@ func (f *Fiber) reconcile() {
 		return
 	}
 	if cleaned {
-		f.load(resolved)
+		f.load(bindings)
 		return
 	}
 
@@ -529,7 +526,7 @@ func (f *Fiber) reconcile() {
 		f.unload()
 		return
 	}
-	f.load(resolved)
+	f.load(bindings)
 }
 
 // resolveInjections resolves every injected service and encodes the provider
@@ -537,25 +534,25 @@ func (f *Fiber) reconcile() {
 // load never runs against an epoch that describes another generation.
 func (f *Fiber) resolveInjections() (map[string]*serviceBinding, string) {
 	names := f.Inject()
-	resolved := make(map[string]*serviceBinding, len(names))
+	bindings := make(map[string]*serviceBinding, len(names))
 	var builder strings.Builder
 	for _, name := range names {
 		binding := f.shared().lookupService(f.Ctx.isolateLabel(name))
 		if binding == nil {
 			return nil, epochInactive
 		}
-		resolved[name] = binding
+		bindings[name] = binding
 		builder.WriteByte(':')
 		builder.WriteString(strconv.Itoa(binding.provider.UID))
 	}
-	return resolved, builder.String()
+	return bindings, builder.String()
 }
 
 // load runs one plugin generation from a dependency snapshot resolved by plan.
 //
 // The caller is the refresh owner. load still re-checks disposed and provider
 // liveness because callbacks and concurrent disposal can invalidate the plan.
-func (f *Fiber) load(resolved map[string]*serviceBinding) {
+func (f *Fiber) load(bindings map[string]*serviceBinding) {
 	f.mu.Lock()
 	if f.disposed {
 		f.mu.Unlock()
@@ -566,7 +563,7 @@ func (f *Fiber) load(resolved map[string]*serviceBinding) {
 	if !f.setState(StateLoading) {
 		return
 	}
-	for _, binding := range resolved {
+	for _, binding := range bindings {
 		if binding.live() {
 			continue
 		}
@@ -577,7 +574,7 @@ func (f *Fiber) load(resolved map[string]*serviceBinding) {
 	}
 
 	f.mu.Lock()
-	f.resolvedServices = resolved
+	f.resolvedServices = bindings
 	raw := f.rawConfig
 	f.mu.Unlock()
 
