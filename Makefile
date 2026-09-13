@@ -10,7 +10,7 @@ GOFMT       ?= gofmt
 STATICCHECK ?= staticcheck
 REVIVE      ?= revive
 
-.PHONY: all fmt vet lint test integration fuzz tools ci
+.PHONY: all fmt vet lint test integration fuzz examples tools ci
 
 all: ci
 
@@ -47,6 +47,21 @@ integration:
 # on every plain `go test` as ordinary regression cases.
 fuzz:
 	$(GO) test -fuzz=FuzzCompose -fuzztime=30s -run '^$$' ./loader
+
+# Run every example once. `go vet` already compiles them; this executes them,
+# because the README tells readers to, and a demo that no longer runs is a
+# regression the compiler cannot see. The timeout tool guards a hang where it
+# exists (CI); locally a hung demo still fails the target by hand.
+examples:
+	@for dir in examples/*/; do \
+		name=$$(basename "$$dir"); \
+		printf '=== %s\n' "$$name"; \
+		if command -v timeout >/dev/null 2>&1; then \
+			timeout 60 $(GO) run ./examples/$$name || exit 1; \
+		else \
+			$(GO) run ./examples/$$name || exit 1; \
+		fi \
+	done
 
 # Install the lint tools at the versions this repository is verified against.
 tools:

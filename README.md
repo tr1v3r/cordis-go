@@ -323,6 +323,7 @@ make ci      # CI 跑的东西：gofmt 检查 + go vet + staticcheck + revive + 
 | `make test` | `go test -race ./...` |
 | `make integration` | `go test -race -count=3 ./...`，重复跑以抖出时序问题；`.github/workflows/integration.yml` 执行 |
 | `make fuzz` | 对 loader 配置路径模糊测试 30s（`FuzzCompose`；种子语料随普通 `go test` 回归） |
+| `make examples` | 逐个执行六个示例（`go vet` 只编译它们；能跑起来是另一回事），CI 执行 |
 | `make tools` | 安装固定版本的 staticcheck / revive |
 | `make ci` | `lint` + `test`，`.github/workflows/ci.yml` 执行同一入口 |
 
@@ -347,7 +348,7 @@ make ci      # CI 跑的东西：gofmt 检查 + go vet + staticcheck + revive + 
   两个被测包各挂一个 `TestMain` 做泄漏检测。覆盖率现场量：
   `go test -race -cover ./...` 给出核心包 93% 上下、`loader` 92% 上下。这两个数字只是某个 dev
   基线上的量级，会随提交变化（加一个测试就会动），所以这里不写死——要当前值就跑那条命令。
-  `examples/` 不在统计里（示例靠 `go run` 验证）；`cmd/cordis` 的退出码契约由它自己的进程内测试
+  `examples/` 不在统计里（六个示例由 `make examples` 在 CI 里逐个执行）；`cmd/cordis` 的退出码契约由它自己的进程内测试
   钉住（`--help` / 用法错误 / 加载失败三档）
 - 交叉编译验证：linux/amd64、windows/amd64、darwin/arm64
 - ⚠️ 破坏性变更：`Definition` 不再导出；`ctx.Load` / `ctx.LoadWithInject` 改为泛型方法

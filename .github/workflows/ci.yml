@@ -23,3 +23,5 @@ jobs:
         run: echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
       - name: Lint and test
         run: make ci
+      - name: Run the examples
+        run: make examples
