@@ -654,6 +654,54 @@ func TestGroupInjectGatesChildren(t *testing.T) {
 	}
 }
 
+// TestComposeBaseDuplicateIDKeepsFirst pins the policy for the case the old
+// applyBase check policed: a base layer repeating a top-level id used to fail
+// composition outright, while the same document reordered composed silently.
+// Both orders now warn and keep the first entry, and Strict() stays loud.
+func TestComposeBaseDuplicateIDKeepsFirst(t *testing.T) {
+	base := loader.Layer{Label: "base", Entries: []*loader.Patch{
+		{ID: "x", Name: strptr("db"), Label: strptr("first"),
+			Config: map[string]any{"path": "first.db"}},
+		{ID: "x", Name: strptr("db"), Label: strptr("second"),
+			Config: map[string]any{"path": "second.db"}},
+	}}
+	patch := loader.Layer{Label: "p", Patch: true, Entries: []*loader.Patch{{
+		ID: "x", Config: map[string]any{"path": "patched.db"},
+	}}}
+
+	tree, err := loader.Compose([]loader.Layer{base, patch})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `layer base: duplicate entry id "x"`
+	if len(tree.Warnings) != 1 || tree.Warnings[0] != want {
+		t.Fatalf("want exactly one warning %q, got %v", want, tree.Warnings)
+	}
+	node := tree.Find("x")
+	if node == nil {
+		t.Fatal("the entry that kept the id must stay addressable")
+	}
+	if node.Label != "first" {
+		t.Fatalf("want the first entry to keep the id, got label %q", node.Label)
+	}
+	if node.Config["path"] != "patched.db" {
+		t.Fatalf("want the patch to reach the node Find returns, got %v", node.Config)
+	}
+	shadow := shadowNode(tree, node)
+	if shadow == nil {
+		t.Fatal("want both entries in the tree, got only one")
+	}
+	if shadow.Config["path"] != "second.db" {
+		t.Fatalf("want the shadowed entry untouched at second.db, got %v", shadow.Config)
+	}
+	if tree.Size() != 2 {
+		t.Fatalf("want both entries counted, got %d nodes", tree.Size())
+	}
+	if _, err := loader.Compose([]loader.Layer{base, patch}, loader.Strict()); err == nil {
+		t.Fatal("strict composition must reject a duplicate id")
+	}
+}
+
 func TestPatchInsertRejectsDuplicateID(t *testing.T) {
 	base := loader.Layer{Label: "base", Entries: []*loader.Patch{{ID: "a", Name: strptr("db")}}}
 	patch := loader.Layer{Label: "p", Patch: true, Entries: []*loader.Patch{{
@@ -675,6 +723,82 @@ func TestPatchInsertRejectsDuplicateID(t *testing.T) {
 	}
 	if _, err := loader.Compose([]loader.Layer{base, patch}, loader.Strict()); err == nil {
 		t.Fatal("strict composition must reject a duplicate id")
+	}
+}
+
+// TestComposeNestedDuplicateIDKeepsFirst pins the invariant that a patch and
+// Find agree on which node an id names. A blindly overwritten index sent the
+// patch to the last node registered while Find returned the first one in DFS
+// order, and swapping the two entries turned the same document into a hard
+// error.
+func TestComposeNestedDuplicateIDKeepsFirst(t *testing.T) {
+	topLevel := func() *loader.Patch {
+		return &loader.Patch{ID: "x", Name: strptr("db"), Label: strptr("outer"),
+			Config: map[string]any{"path": "outer.db"}}
+	}
+	group := func() *loader.Patch {
+		return &loader.Patch{ID: "grp", Group: boolptr(true), Plugins: []*loader.Patch{
+			{ID: "x", Name: strptr("db"), Label: strptr("inner"),
+				Config: map[string]any{"path": "inner.db"}},
+		}}
+	}
+
+	for _, tc := range []struct {
+		name       string
+		entries    []*loader.Patch
+		wantLabel  string
+		shadowPath string
+	}{
+		{
+			name:       "top level entry first",
+			entries:    []*loader.Patch{topLevel(), group()},
+			wantLabel:  "outer",
+			shadowPath: "inner.db",
+		},
+		{
+			name:       "nested entry first",
+			entries:    []*loader.Patch{group(), topLevel()},
+			wantLabel:  "inner",
+			shadowPath: "outer.db",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			base := loader.Layer{Label: "base", Entries: tc.entries}
+			patch := loader.Layer{Label: "p", Patch: true, Entries: []*loader.Patch{{
+				ID: "x", Config: map[string]any{"path": "patched.db"},
+			}}}
+
+			tree, err := loader.Compose([]loader.Layer{base, patch})
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := `layer base: duplicate entry id "x"`
+			if len(tree.Warnings) != 1 || tree.Warnings[0] != want {
+				t.Fatalf("want exactly one warning %q, got %v", want, tree.Warnings)
+			}
+			node := tree.Find("x")
+			if node == nil {
+				t.Fatal("the entry that kept the id must stay addressable")
+			}
+			if node.Label != tc.wantLabel {
+				t.Fatalf("want the first entry to keep the id (label %q), got %q",
+					tc.wantLabel, node.Label)
+			}
+			if node.Config["path"] != "patched.db" {
+				t.Fatalf("want the patch to reach the node Find returns, got %v", node.Config)
+			}
+			shadow := shadowNode(tree, node)
+			if shadow == nil {
+				t.Fatal("want both entries in the tree, got only one")
+			}
+			if shadow.Config["path"] != tc.shadowPath {
+				t.Fatalf("want the shadowed entry untouched at %q, got %v",
+					tc.shadowPath, shadow.Config)
+			}
+			if _, err := loader.Compose([]loader.Layer{base, patch}, loader.Strict()); err == nil {
+				t.Fatal("strict composition must reject a duplicate id")
+			}
+		})
 	}
 }
 
@@ -717,6 +841,24 @@ func TestComposeNonGroupChildrenWarnAndStrictFails(t *testing.T) {
 			}
 		})
 	}
+}
+
+// shadowNode returns the other node carrying the same id as keeper, walking the
+// tree in DFS order instead of trusting the index under test.
+func shadowNode(tree *loader.Tree, keeper *loader.Node) *loader.Node {
+	var walk func(nodes []*loader.Node) *loader.Node
+	walk = func(nodes []*loader.Node) *loader.Node {
+		for _, node := range nodes {
+			if node.ID == keeper.ID && node != keeper {
+				return node
+			}
+			if found := walk(node.Children); found != nil {
+				return found
+			}
+		}
+		return nil
+	}
+	return walk(tree.Nodes)
 }
 
 // TestComposeRejectsMixedInsert pins the loud rejection of an entry that

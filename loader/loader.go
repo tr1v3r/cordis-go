@@ -300,14 +300,14 @@ func (c *treeComposer) applyBase(source string, targetNodes *[]*Node, entry *Pat
 		if baseEntry.ID == "" && baseEntry.Name == nil {
 			return fmt.Errorf("layer %s: entry requires id or name", source)
 		}
-		if baseEntry.ID != "" {
-			if _, exists := c.index[baseEntry.ID]; exists {
-				return fmt.Errorf("layer %s: duplicate entry id %q", source, baseEntry.ID)
-			}
-		}
 		node := createNode(baseEntry, source)
 		*targetNodes = append(*targetNodes, node)
-		c.indexNode(node)
+		// Duplicates are reported by indexNode, which sees nested children too.
+		// Keeping one path for every creation site also keeps the outcome
+		// independent of the order the entries happen to appear in.
+		if err := c.indexNode(node); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -337,7 +337,9 @@ func (c *treeComposer) applyPatch(source string, targetNodes *[]*Node, patch *Pa
 			}
 			node := createNode(insertedEntry, source)
 			*targetNodes = append(*targetNodes, node)
-			c.indexNode(node)
+			if err := c.indexNode(node); err != nil {
+				return err
+			}
 		}
 		return nil
 	}
@@ -416,16 +418,31 @@ func mergePatch(node *Node, patch *Patch, source string) {
 
 // indexNode registers a node and all of its descendants in the global id
 // index, so a later layer can patch a nested group child by id.
-func (c *treeComposer) indexNode(node *Node) {
+//
+// The first node keeps the id. Overwriting it would send a later patch to one
+// node while Find and Dump keep reporting the other, so the tree would answer
+// "what is configured for x?" differently depending on who asks.
+func (c *treeComposer) indexNode(node *Node) error {
 	if node == nil {
-		return
+		return nil
 	}
 	if node.ID != "" {
-		c.index[node.ID] = node
+		if _, exists := c.index[node.ID]; exists {
+			message := fmt.Sprintf("layer %s: duplicate entry id %q", node.Source, node.ID)
+			if c.options.strict {
+				return fmt.Errorf("%s", message)
+			}
+			c.tree.Warnings = append(c.tree.Warnings, message)
+		} else {
+			c.index[node.ID] = node
+		}
 	}
 	for _, child := range node.Children {
-		c.indexNode(child)
+		if err := c.indexNode(child); err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
 func cloneMap(source map[string]any) map[string]any {
