@@ -1,6 +1,7 @@
 package cordis_test
 
 import (
+	"reflect"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -77,5 +78,54 @@ func TestProviderRebindingDuringBusyLoadReloadsDependent(t *testing.T) {
 	service, ok := cordis.Get[*rebindDB](consumerCtx, "db")
 	if !ok || service.gen != 2 {
 		t.Fatalf("want the rebound service (gen 2), got %+v (ok=%v)", service, ok)
+	}
+}
+
+// TestSetSwapsValueWithoutReloadingDependent pins the other side of the binding
+// identity: Set swaps the value inside the registered binding, so the epoch
+// stays the same and a dependent keeps serving without a reload. Only a real
+// rebinding — releasing the registration and providing the name again — may
+// reload a dependent; the sequence number must never change on Set.
+func TestSetSwapsValueWithoutReloadingDependent(t *testing.T) {
+	root := cordis.New()
+	if _, err := cordis.Provide[*fakeDB](root, "db", &fakeDB{name: "v1"}); err != nil {
+		t.Fatal(err)
+	}
+
+	var (
+		runs        int
+		seen        []string
+		consumerCtx *cordis.Context
+	)
+	consumer := cordis.Define[struct{}]("consumer", func(ctx *cordis.Context, _ struct{}) error {
+		consumerCtx = ctx
+		runs++
+		db, _ := cordis.Get[*fakeDB](ctx, "db")
+		seen = append(seen, db.name)
+		ctx.OnDispose(func() {})
+		return nil
+	}).WithInject("db")
+	fiber, err := root.Load(consumer, struct{}{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFiberState(t, fiber, cordis.StateActive)
+
+	if err := root.Set("db", &fakeDB{name: "v2"}); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := runs; got != 1 {
+		t.Fatalf("want the dependent to keep serving without a reload, got %d runs", got)
+	}
+	if fiber.State() != cordis.StateActive {
+		t.Fatalf("want active after the in-place swap, got %s", fiber.State())
+	}
+	if want := []string{"v1"}; !reflect.DeepEqual(seen, want) {
+		t.Fatalf("want the body to have run against %v, got %v", want, seen)
+	}
+	db, ok := cordis.Get[*fakeDB](consumerCtx, "db")
+	if !ok || db.name != "v2" {
+		t.Fatalf("want the swapped value v2 through the same binding, got %+v (ok=%v)", db, ok)
 	}
 }

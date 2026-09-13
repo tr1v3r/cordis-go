@@ -1,6 +1,7 @@
 package cordis_test
 
 import (
+	"reflect"
 	"sync/atomic"
 	"testing"
 
@@ -41,6 +42,83 @@ func TestPanicInEffectBodyUnwindsNestedEffects(t *testing.T) {
 	if got := hits.Load(); got != 0 {
 		t.Fatalf("want the nested listener to be gone, got %d deliveries", got)
 	}
+}
+
+// TestNestedEffectPanicUnwindsWholeCascade pins the nested panic path: a body
+// that panics detaches its entry from its parent and unwinds the effects it had
+// already adopted, and the enclosing body's own panic then unwinds its remaining
+// children too, innermost first. Nothing may stay attached behind the fiber and
+// the fiber must keep accepting reachable effects afterwards.
+func TestNestedEffectPanicUnwindsWholeCascade(t *testing.T) {
+	root := cordis.New()
+	before := len(root.Effects()) // the three built-in services
+
+	var order []string
+	panicked := func() (panicked bool) {
+		defer func() { panicked = recover() != nil }()
+		root.Effect("outer", func() cordis.Disposer {
+			root.OnDispose(func() { order = append(order, "outer-sibling") })
+			root.Effect("inner", func() cordis.Disposer {
+				root.OnDispose(func() { order = append(order, "inner-child") })
+				panic("boom")
+			})
+			return func() {}
+		})
+		return false
+	}()
+	if !panicked {
+		t.Fatal("want the effect body panic to propagate")
+	}
+
+	want := []string{"inner-child", "outer-sibling"}
+	if !reflect.DeepEqual(order, want) {
+		t.Fatalf("want %v, got %v", want, order)
+	}
+	if got := len(root.Effects()); got != before {
+		t.Fatalf("want effects back at %d, got %d", before, got)
+	}
+
+	// An effect registered after the cascade must be reachable: disposal still
+	// unwinds it exactly once.
+	unwound := 0
+	root.Effect("after", func() cordis.Disposer {
+		return func() { unwound++ }
+	})
+	root.Fiber().Dispose()
+	if unwound != 1 {
+		t.Fatalf("want the post-cascade effect unwound once by disposal, got %d", unwound)
+	}
+}
+
+// TestServiceProvidedInPanickingBodyReleasesName pins the registry consequence
+// of the panic unwind: a service provided by a body that panics must not keep
+// its name occupied, because the unwind reaches the Provide disposer the body
+// never returned.
+func TestServiceProvidedInPanickingBodyReleasesName(t *testing.T) {
+	root := cordis.New()
+
+	var provideErr error
+	panicked := func() (panicked bool) {
+		defer func() { panicked = recover() != nil }()
+		root.Effect("outer", func() cordis.Disposer {
+			_, provideErr = cordis.Provide[*fakeDB](root, "db", &fakeDB{name: "temp"})
+			panic("boom")
+		})
+		return false
+	}()
+	if !panicked {
+		t.Fatal("want the effect body panic to propagate")
+	}
+	if provideErr != nil {
+		t.Fatalf("want the provide inside the body to succeed, got %v", provideErr)
+	}
+
+	// The name is free again: providing it once more must not collide with the
+	// binding of the aborted generation.
+	if _, err := cordis.Provide[*fakeDB](root, "db", &fakeDB{name: "kept"}); err != nil {
+		t.Fatalf("want the name released by the unwind, got %v", err)
+	}
+	root.Fiber().Dispose()
 }
 
 // TestConcurrentEffectRegistrationKeepsEffectsReachable pins the effect-tree
