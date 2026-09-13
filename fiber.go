@@ -436,7 +436,6 @@ func (f *Fiber) applyUnload() {
 	f.mu.Lock()
 	if f.disposed {
 		f.mu.Unlock()
-		f.unload()
 		return
 	}
 	f.epoch = epochInactive
@@ -450,7 +449,6 @@ func (f *Fiber) applyLoad(bindings map[string]*serviceBinding, epoch string) {
 	f.mu.Lock()
 	if f.disposed {
 		f.mu.Unlock()
-		f.unload()
 		return
 	}
 	f.epoch = epoch
