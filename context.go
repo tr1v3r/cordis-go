@@ -238,9 +238,12 @@ func (c *Context) resolveService(name string) *serviceBinding {
 		binding := fiber.resolvedServices[name]
 		fiber.mu.Unlock()
 		// The snapshot is keyed by service name, so it can hold at most one
-		// binding per name; the scope guard keeps isolated services apart, and
-		// the availability check hides a service while its predicate fails.
-		if binding != nil && binding.scopeLabel == scopeLabel && binding.available() {
+		// binding per name; the scope guard keeps isolated services apart, the
+		// name guard rejects a binding another service name isolated onto this
+		// label, and the availability check hides a service while its predicate
+		// fails.
+		if binding != nil && binding.name == name && binding.scopeLabel == scopeLabel &&
+			binding.available() {
 			return binding
 		}
 		parentCtx := fiber.Parent
@@ -252,7 +255,7 @@ func (c *Context) resolveService(name string) *serviceBinding {
 		}
 		fiber = parentCtx.fiber
 	}
-	return c.shared.lookupService(scopeLabel)
+	return c.shared.lookupService(scopeLabel, name)
 }
 
 // Get reads a service with a type assertion. It reports false when the service
