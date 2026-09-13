@@ -368,7 +368,23 @@ const (
 )
 
 // sync reconciles one fiber with its pending requests and current dependencies.
-func (f *Fiber) sync() { f.apply(f.plan()) }
+func (f *Fiber) sync() {
+	action, bindings, epoch := f.plan()
+	switch action {
+	case actionNoop:
+		return
+	case actionUnload:
+		f.applyUnload()
+	case actionDispose:
+		f.unload()
+	case actionLoad:
+		f.applyLoad(bindings, epoch)
+	case actionCycle:
+		f.applyCycle(bindings, epoch)
+	case actionReload:
+		f.reload()
+	}
+}
 
 // plan consumes pending requests and selects the next transition without
 // mutating lifecycle state beyond clearing forceReload. bindings and epoch are
@@ -403,26 +419,6 @@ func (f *Fiber) plan() (action fiberAction, bindings map[string]*serviceBinding,
 		return actionLoad, bindings, epoch
 	}
 	return actionCycle, bindings, epoch
-}
-
-// apply executes a planned transition. User callbacks may run here, so f.mu is
-// never held across load or unload.
-func (f *Fiber) apply(action fiberAction, bindings map[string]*serviceBinding,
-	epoch string) {
-	switch action {
-	case actionNoop:
-		return
-	case actionUnload:
-		f.applyUnload()
-	case actionDispose:
-		f.unload()
-	case actionLoad:
-		f.applyLoad(bindings, epoch)
-	case actionCycle:
-		f.applyCycle(bindings, epoch)
-	case actionReload:
-		f.reload()
-	}
 }
 
 // applyUnload records the inactive epoch and unloads the current generation.
