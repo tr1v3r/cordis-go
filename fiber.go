@@ -129,7 +129,7 @@ func newRootFiber(ctx *Context) *Fiber {
 }
 
 func newFiber(parentCtx *Context, runtime *runtime, cfg any,
-	inject map[string]struct{}) (*Fiber, error) {
+	inject map[string]struct{}) *Fiber {
 	lifecycleCtx, cancel := context.WithCancel(parentCtx.fiber.lifecycleCtx)
 	fiber := &Fiber{
 		Parent:       parentCtx,
@@ -148,29 +148,37 @@ func newFiber(parentCtx *Context, runtime *runtime, cfg any,
 	fiber.UID = parentCtx.shared.nextUID()
 	fiber.Ctx = parentCtx.Fork(runtime.name)
 	fiber.Ctx.fiber = fiber
+	return fiber
+}
 
-	// The parent owns the child's lifetime: disposing the parent disposes every
+// start attaches the fiber to its parent and publishes it. It returns an error
+// when the parent is already unloading or disposed, so the caller must abort
+// instead of leaving an orphan fiber behind.
+func (f *Fiber) start() error {
+	parent := f.Parent
+
+	// The parent owns the child lifetime: disposing the parent disposes every
 	// plugin loaded beneath it. Use tryEffect so a parent that starts unloading
 	// during Load returns an error instead of panicking out of the constructor.
-	parentEffectDisposer, err := parentCtx.fiber.tryEffect("child",
-		func() Disposer { return fiber.Dispose })
+	parentEffectDisposer, err := parent.fiber.tryEffect("child",
+		func() Disposer { return f.Dispose })
 	if err != nil {
-		cancel()
-		return nil, err
+		return err
 	}
-	fiber.mu.Lock()
-	if fiber.disposed {
-		fiber.mu.Unlock()
+	f.mu.Lock()
+	if f.disposed {
+		f.mu.Unlock()
 		parentEffectDisposer()
 	} else {
-		fiber.parentEffectDisposer = parentEffectDisposer
-		fiber.mu.Unlock()
+		f.parentEffectDisposer = parentEffectDisposer
+		f.mu.Unlock()
 	}
-	parentCtx.shared.addFiber(runtime, fiber)
-	parentCtx.shared.bus.emitInternal("internal/plugin", &PluginEvent{Fiber: fiber})
-	fiber.refresh()
-	return fiber, nil
+	f.shared().addFiber(f.runtime, f)
+	f.shared().bus.emitInternal("internal/plugin", &PluginEvent{Fiber: f})
+	f.refresh()
+	return nil
 }
+
 func (f *Fiber) shared() *core { return f.Ctx.shared }
 
 // State returns the current lifecycle state.
