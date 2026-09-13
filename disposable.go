@@ -69,18 +69,57 @@ type effectEntry struct {
 	dispose  Disposer
 	deferred bool
 	done     bool
+	// running marks the entry whose body is executing right now. Only a running
+	// entry may adopt nested effects: nesting under a finished one would leave
+	// the child where no unload can reach it.
+	running bool
+	// parent is the enclosing effect, nil for a fiber-level one. It is written
+	// and read under the owning fiber's lock, before the entry becomes visible,
+	// so it needs no lock of its own.
+	parent *effectEntry
 	// children are effects registered while this effect's body ran. Their
 	// lifetime belongs to this effect, mirroring Cordis, where a nested effect
 	// is collected by its owner instead of the fiber's flat list.
 	children []*effectEntry
 }
 
-// addChild adopts a nested effect.
-func (e *effectEntry) addChild(child *effectEntry) {
+// adopt takes ownership of an effect registered while this entry's body runs.
+// It reports false once the entry is finished or already unwound, which tells
+// the caller to register the effect at the fiber level instead: nesting it
+// under an entry that can no longer reach it would orphan its disposer.
+func (e *effectEntry) adopt(child *effectEntry) bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	if e.done || !e.running {
+		return false
+	}
+	child.parent = e
 	e.children = append(e.children, child)
 	e.meta.addChild(child.meta)
+	return true
+}
+
+// finishBody marks this entry's body as returned, so it can no longer adopt
+// effects.
+func (e *effectEntry) finishBody() {
+	e.mu.Lock()
+	e.running = false
+	e.mu.Unlock()
+}
+
+// runningAncestor returns the nearest enclosing effect whose body is still
+// running, or nil when none is. It is nil-safe, so a fiber-level effect asks
+// its absent parent for the scope to restore and gets nil.
+func (e *effectEntry) runningAncestor() *effectEntry {
+	for cur := e; cur != nil; cur = cur.parent {
+		cur.mu.Lock()
+		running := cur.running
+		cur.mu.Unlock()
+		if running {
+			return cur
+		}
+	}
+	return nil
 }
 
 // detach releases a nested effect that was disposed individually.
@@ -126,11 +165,17 @@ func (e *effectEntry) setDispose(dispose Disposer) bool {
 }
 
 // abandon marks the entry as finished without ever running a disposer, for an
-// effect body that panicked before producing one.
-func (e *effectEntry) abandon() {
+// effect body that panicked before producing one. It returns the nested effects
+// the entry had adopted, so the caller can still unwind them: abandoning the
+// entry must not make its children unreachable.
+func (e *effectEntry) abandon() []*effectEntry {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.done = true
+	e.running = false
+	children := e.children
+	e.children = nil
+	return children
 }
 
 // disposableList is an ordered collection of effects supporting removal by

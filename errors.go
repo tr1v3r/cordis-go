@@ -7,15 +7,24 @@ type ErrorCode string
 
 // Framework error codes.
 const (
-	// ErrInactiveEffect is returned when an effect is created on a context
-	// whose fiber has already been disposed or is unloading.
+	// ErrInactiveEffect means the operation needs a live fiber but the fiber is
+	// already disposed or is unloading. The registration helpers that go through
+	// fiber.effect - ctx.On, ctx.OnOnce, ctx.OnValue, ctx.OnWaterfall,
+	// ctx.OnDispose and ctx.Effect - panic with it, because a plugin body calls
+	// them. ctx.Provide, ctx.ProvideChecked and ctx.Serve return it instead: the
+	// owner was already inactive, or the effect registration lost a race with the
+	// fiber going inactive, in which case the binding it just registered is rolled
+	// back. Restart and Update return it too.
 	ErrInactiveEffect ErrorCode = "INACTIVE_EFFECT"
 	// ErrInvalidPlugin is returned when a value is not a usable plugin.
 	ErrInvalidPlugin ErrorCode = "INVALID_PLUGIN"
 	// ErrServiceExists is returned when a service name is already provided in
 	// the same isolation scope.
 	ErrServiceExists ErrorCode = "SERVICE_EXISTS"
-	// ErrServiceMissing is returned when a required service is not available.
+	// ErrServiceMissing is returned whenever a service is required and cannot be
+	// used: MustGet when the name is unregistered, its provider is inactive, or
+	// the value has another type; Provide with an empty name; Set on a name that
+	// is not provided, and Set whose provider was replaced mid-update.
 	ErrServiceMissing ErrorCode = "SERVICE_MISSING"
 	// ErrServiceOwnership is returned when a fiber tries to mutate a service it
 	// does not own.
@@ -37,9 +46,14 @@ func (e *Error) Error() string {
 }
 
 // Is reports whether target carries the same code.
+//
+// A nil *Error never matches, on either side of the comparison: errors.Is hands
+// the target straight to this method and does not recover, so a caller that
+// leaves an optional target unset, or that compares a nil error, must get "no
+// match" instead of a panic.
 func (e *Error) Is(target error) bool {
 	other, ok := target.(*Error)
-	return ok && other.Code == e.Code
+	return e != nil && ok && other != nil && other.Code == e.Code
 }
 
 func newError(code ErrorCode, format string, args ...any) *Error {

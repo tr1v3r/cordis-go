@@ -109,7 +109,9 @@ type Fiber struct {
 	live bool
 
 	// current is the effect whose body is running; registrations inside it
-	// become its children.
+	// become its children. It is always nil or an entry whose body is still
+	// running, so a registration can never nest under an effect that is already
+	// finished or unwound.
 	current *effectEntry
 
 	// parentEffectDisposer releases this fiber's slot in the parent's tree.
@@ -188,13 +190,18 @@ func (f *Fiber) start() error {
 	}
 	f.mu.Lock()
 	if f.disposed {
+		// The parent unloaded while this fiber was attaching, so Dispose
+		// already released everything the fiber owns. It never takes a slot in
+		// its runtime: a fiber attached after its own disposal could not be
+		// removed again.
 		f.mu.Unlock()
 		parentEffectDisposer()
-	} else {
-		f.parentEffectDisposer = parentEffectDisposer
-		f.mu.Unlock()
+		f.shared().discardRuntime(f.runtime)
+		return nil
 	}
-	f.shared().addFiber(f.runtime, f)
+	f.parentEffectDisposer = parentEffectDisposer
+	f.mu.Unlock()
+	f.shared().attachFiber(f.runtime, f)
 	f.shared().bus.emitInternal("internal/plugin", &PluginEvent{Fiber: f})
 	f.refresh()
 	return nil
@@ -294,6 +301,13 @@ func (f *Fiber) effect(label string, body func() Disposer) Disposer {
 // The entry is published before the body runs. If the body disposes the fiber,
 // or another goroutine unloads it while the body runs, the teardown is deferred
 // to this function instead of being lost.
+//
+// Nesting is decided per registration and never on stale state: the entry
+// adopts a nested effect only while its own body runs, a registration that
+// finds a finished enclosing effect becomes a fiber-level one instead, and the
+// scope is restored to the nearest body that is still running (or to the fiber
+// level). Concurrent registrations therefore cannot attach an effect to an
+// entry that will never unwind it.
 func (f *Fiber) tryEffect(label string, body func() Disposer) (Disposer, error) {
 	f.mu.Lock()
 	if f.disposed || f.state == StateUnloading {
@@ -301,23 +315,30 @@ func (f *Fiber) tryEffect(label string, body func() Disposer) (Disposer, error) 
 		return nil, newError(ErrInactiveEffect,
 			"cannot create effect on inactive context %q", f.Name())
 	}
-	entry := &effectEntry{meta: &EffectMeta{Label: label}}
+	entry := &effectEntry{meta: &EffectMeta{Label: label}, running: true}
 	parentEffect := f.current
 	var remove func() bool
-	if parentEffect != nil {
-		// A nested effect is owned by the enclosing one, exactly like Cordis's
-		// effect collector: disposing the outer effect disposes its children.
-		parentEffect.addChild(entry)
-	} else {
+	if parentEffect != nil && !parentEffect.adopt(entry) {
+		// The enclosing effect finished (or was unwound) meanwhile; owning the
+		// entry there would leave its disposer unreachable.
+		parentEffect = nil
+	}
+	if parentEffect == nil {
 		_, remove = f.disposables.add(entry)
 	}
 	f.current = entry
 	f.mu.Unlock()
 
 	dispose, panicked := runEffectBody(body)
+	entry.finishBody()
 
 	f.mu.Lock()
-	f.current = parentEffect
+	if f.current == entry {
+		// Restore the enclosing scope. A registration from another goroutine may
+		// be current by now: leave it alone rather than clobbering it with this
+		// call's captured parent.
+		f.current = parentEffect.runningAncestor()
+	}
 	f.mu.Unlock()
 
 	if panicked != nil {
@@ -326,7 +347,9 @@ func (f *Fiber) tryEffect(label string, body func() Disposer) (Disposer, error) 
 		} else {
 			remove()
 		}
-		entry.abandon()
+		// The body panicked before producing a disposer, but the effects it
+		// registered before that still have to unwind.
+		f.unwindChildren(entry.abandon())
 		panic(panicked)
 	}
 	if dispose == nil {
@@ -362,6 +385,11 @@ func (f *Fiber) runDisposer(entry *effectEntry) {
 		f.callDisposer(entry, dispose)
 	}
 	// Nested effects unwind after their owner, newest first.
+	f.unwindChildren(children)
+}
+
+// unwindChildren disposes nested effects newest-first, after their owner.
+func (f *Fiber) unwindChildren(children []*effectEntry) {
 	for i := range slices.Backward(children) {
 		f.runDisposer(children[i])
 	}
@@ -492,21 +520,19 @@ func (f *Fiber) applyUnload() {
 	f.unload()
 }
 
-// applyLoad commits the resolved epoch and runs the plugin body on a clean
-// fiber.
+// applyLoad runs the plugin body for a resolved generation on a clean fiber.
 func (f *Fiber) applyLoad(bindings map[string]*serviceBinding, epoch string) {
 	f.mu.Lock()
 	if f.disposed {
 		f.mu.Unlock()
 		return
 	}
-	f.epoch = epoch
 	f.mu.Unlock()
-	f.load(bindings)
+	f.load(bindings, epoch)
 }
 
-// reload forces an unload/reload cycle for Restart and Update. It resets the
-// recorded epoch so the next load runs even when dependencies are unchanged.
+// reload forces an unload/reload cycle for Restart and Update. It forgets the
+// recorded generation so the new one loads even when dependencies are unchanged.
 func (f *Fiber) reload() {
 	f.unload()
 
@@ -523,35 +549,36 @@ func (f *Fiber) reload() {
 	// Resolve after the old generation is gone: unload may have changed the
 	// service registry, so pre-unload bindings can already be stale.
 	bindings, epoch := f.resolveInjections()
-
-	f.mu.Lock()
-	if f.disposed || epoch == epochInactive {
-		f.mu.Unlock()
+	if epoch == epochInactive {
 		return
 	}
-	f.epoch = epoch
-	f.mu.Unlock()
 
 	// reload unloaded the previous generation at entry, so the fiber is clean
 	// here. load re-checks disposed before it starts the new body.
-	f.load(bindings)
+	f.load(bindings, epoch)
 }
 
 // resolveInjections resolves every injected service and encodes the provider
-// identity into one epoch. The snapshot and epoch come from the same pass, so a
-// load never runs against an epoch that describes another generation.
+// identity and the binding identity into one epoch. The snapshot and epoch come
+// from the same pass, so a load never runs against an epoch that describes
+// another generation.
 func (f *Fiber) resolveInjections() (map[string]*serviceBinding, string) {
 	names := f.Inject()
 	bindings := make(map[string]*serviceBinding, len(names))
 	var builder strings.Builder
 	for _, name := range names {
-		binding := f.shared().lookupService(f.Ctx.isolateLabel(name))
+		binding := f.shared().lookupService(f.Ctx.isolateLabel(name), name)
 		if binding == nil {
 			return nil, epochInactive
 		}
 		bindings[name] = binding
+		// The binding sequence matters as much as the provider: a provider that
+		// releases its registration and provides the name again keeps its UID,
+		// but a dependent pinned to the released object must still reload.
 		builder.WriteByte(':')
 		builder.WriteString(strconv.Itoa(binding.provider.UID))
+		builder.WriteByte('.')
+		builder.WriteString(strconv.Itoa(binding.seq))
 	}
 	return bindings, builder.String()
 }
@@ -560,7 +587,7 @@ func (f *Fiber) resolveInjections() (map[string]*serviceBinding, string) {
 //
 // The caller is the refresh owner. load still re-checks disposed and provider
 // liveness because callbacks and concurrent disposal can invalidate the decision.
-func (f *Fiber) load(bindings map[string]*serviceBinding) {
+func (f *Fiber) load(bindings map[string]*serviceBinding, epoch string) {
 	f.mu.Lock()
 	if f.disposed {
 		f.mu.Unlock()
@@ -578,12 +605,23 @@ func (f *Fiber) load(bindings map[string]*serviceBinding) {
 		if binding.live() {
 			continue
 		}
-		// Record the rerun; drive re-resolves on the next pass.
+		// Nothing of this generation started, so give the claim back: record the
+		// inactive epoch and return to pending. Without that the rerun pass would
+		// compare the re-resolved epoch against a committed one, match, and leave
+		// the fiber loading forever with no body and no effects.
+		f.mu.Lock()
+		f.live = false
+		f.epoch = epochInactive
+		f.mu.Unlock()
+		f.setState(StatePending)
 		f.refresh()
 		return
 	}
 
+	// The epoch is committed only now, together with the snapshot it describes:
+	// a generation that never ran its body must not look like the loaded one.
 	f.mu.Lock()
+	f.epoch = epoch
 	f.resolvedServices = bindings
 	raw := f.rawConfig
 	f.mu.Unlock()
@@ -718,10 +756,17 @@ func (f *Fiber) notifyProvided() {
 	}
 }
 
-// Dispose starts unloading the plugin and releases everything it registered.
-// It is idempotent. Cancellation happens immediately; when a refresh transition
-// is already running, the effect teardown is deferred to that loop. Use Disposed
-// to wait for the deferred teardown.
+// Dispose starts unloading the plugin and releases everything it registered. It
+// is idempotent. Cancellation and the removal of the plugin from the registry
+// happen immediately; the effect teardown runs in this call for the root fiber
+// and whenever the fiber is not part of a running transition, and is otherwise
+// deferred to that transition.
+//
+// There is no "fully disposed" channel to await: for a non-root fiber Dispose
+// returns while the state may still be unloading, or before the deferred
+// teardown has run. The terminal state is observable as
+// State() == StateDisposed, which is the replacement for the removed Disposed
+// method.
 func (f *Fiber) Dispose() {
 	f.mu.Lock()
 	if f.disposed {
@@ -805,10 +850,13 @@ func (c *core) nextUID() int {
 	return c.counter
 }
 
-func (c *core) addFiber(runtime *runtime, fiber *Fiber) {
+// attachFiber publishes a fiber under its runtime and gives back the claim its
+// load took on it.
+func (c *core) attachFiber(runtime *runtime, fiber *Fiber) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	runtime.fibers = append(runtime.fibers, fiber)
+	runtime.claims--
 }
 
 func (c *core) removeFiber(runtime *runtime, fiber *Fiber) {
@@ -820,7 +868,7 @@ func (c *core) removeFiber(runtime *runtime, fiber *Fiber) {
 			break
 		}
 	}
-	if len(runtime.fibers) == 0 {
+	if runtime.claims == 0 && len(runtime.fibers) == 0 {
 		delete(c.runtimes, runtime.definition)
 	}
 }

@@ -1,0 +1,19 @@
+name: integration
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          # Same floor as ci.yml: go.mod requires 1.27 for generic methods, and
+          # the race detector needs a toolchain that understands the sources.
+          go-version: '1.27.x'
+      - name: Run the integration suite
+        run: make integration
