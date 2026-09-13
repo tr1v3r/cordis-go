@@ -353,82 +353,39 @@ func (f *Fiber) callDisposer(entry *effectEntry, dispose Disposer) {
 	dispose()
 }
 
-// fiberAction selects one transition in the fiber lifecycle state machine.
-type fiberAction uint8
-
-const (
-	// actionNoop leaves the fiber unchanged: no terminal request, no forced
-	// reload, and the resolved dependency epoch matches the recorded one.
-	actionNoop fiberAction = iota
-
-	// actionUnload drops an unavailable generation. The resolved epoch is
-	// inactive, so the fiber returns to pending after its effects unwind.
-	actionUnload
-
-	// actionLoad starts a new generation on a clean fiber. The resolved epoch
-	// is satisfiable and differs from the recorded one.
-	actionLoad
-
-	// actionReload forces an unload/reload cycle for Restart, Update, or a
-	// live generation whose provider epoch changed. The target dependencies
-	// are resolved after the old generation is unloaded.
-	actionReload
-
-	// actionDispose drives a terminal disposal: unload effects and finalize
-	// the fiber as disposed.
-	actionDispose
-)
-
 // sync reconciles one fiber with its pending requests and current dependencies.
 func (f *Fiber) sync() {
-	action, bindings, epoch := f.plan()
-	switch action {
-	case actionNoop:
-		return
-	case actionUnload:
-		f.applyUnload()
-	case actionDispose:
-		f.unload()
-	case actionLoad:
-		f.applyLoad(bindings, epoch)
-	case actionReload:
-		f.reload()
-	}
-}
-
-// plan consumes pending requests and selects the next transition without
-// mutating lifecycle state beyond clearing forceReload. bindings and epoch are
-// only meaningful for actions that run a load generation.
-func (f *Fiber) plan() (action fiberAction, bindings map[string]*serviceBinding, epoch string) {
 	if f.root || f.runtime == nil {
-		return actionNoop, nil, ""
+		return
 	}
 
 	disposed, forceReload := f.takeRequest()
 	if disposed {
-		return actionDispose, nil, ""
+		f.unload()
+		return
 	}
 	if forceReload {
-		return actionReload, nil, ""
+		f.reload()
+		return
 	}
 
-	bindings, epoch = f.resolveInjections()
+	bindings, epoch := f.resolveInjections()
 
 	f.mu.Lock()
 	same := epoch == f.epoch
 	hasEffects := f.hasEffects
 	f.mu.Unlock()
 
-	if same {
-		return actionNoop, nil, ""
+	switch {
+	case same:
+		return
+	case epoch == epochInactive:
+		f.applyUnload()
+	case hasEffects:
+		f.reload()
+	default:
+		f.applyLoad(bindings, epoch)
 	}
-	if epoch == epochInactive {
-		return actionUnload, nil, ""
-	}
-	if hasEffects {
-		return actionReload, nil, ""
-	}
-	return actionLoad, bindings, epoch
 }
 
 // applyUnload records the inactive epoch and unloads the current generation.
@@ -443,7 +400,7 @@ func (f *Fiber) applyUnload() {
 	f.unload()
 }
 
-// applyLoad commits the planned epoch and runs the plugin body on a clean
+// applyLoad commits the resolved epoch and runs the plugin body on a clean
 // fiber.
 func (f *Fiber) applyLoad(bindings map[string]*serviceBinding, epoch string) {
 	f.mu.Lock()
@@ -507,10 +464,10 @@ func (f *Fiber) resolveInjections() (map[string]*serviceBinding, string) {
 	return bindings, builder.String()
 }
 
-// load runs one plugin generation from a dependency snapshot resolved by plan.
+// load runs one plugin generation from a dependency snapshot resolved by sync.
 //
 // The caller is the refresh owner. load still re-checks disposed and provider
-// liveness because callbacks and concurrent disposal can invalidate the plan.
+// liveness because callbacks and concurrent disposal can invalidate the decision.
 func (f *Fiber) load(bindings map[string]*serviceBinding) {
 	f.mu.Lock()
 	if f.disposed {
