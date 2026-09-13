@@ -2,6 +2,7 @@ package cordis_test
 
 import (
 	"errors"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -331,6 +332,346 @@ func TestBusyDisposeReleasesParentHandle(t *testing.T) {
 	}
 	if err := <-gate2Done; err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestFailedLoadLeavesNoPhantomRuntime pins the registry bookkeeping: a load
+// rejected because its parent started unloading must leave no runtime behind.
+// Nothing else removes it, so Size and Plugins would report a plugin that has
+// no fiber for the rest of the application's life.
+func TestFailedLoadLeavesNoPhantomRuntime(t *testing.T) {
+	root := cordis.New()
+	registry, ok := cordis.Get[cordis.Registry](root, "registry")
+	if !ok {
+		t.Fatal("registry service missing")
+	}
+
+	var parentCtx *cordis.Context
+	unloading := make(chan struct{})
+	releaseParent := make(chan struct{})
+	var blockOnce sync.Once
+	parent := cordis.Define[struct{}]("parent", func(ctx *cordis.Context, _ struct{}) error {
+		parentCtx = ctx
+		ctx.OnDispose(func() {
+			// Block the first unload so the parent stays in StateUnloading
+			// until the test releases it: that is the window Load must survive.
+			blockOnce.Do(func() {
+				close(unloading)
+				<-releaseParent
+			})
+		})
+		return nil
+	})
+	parentFiber, err := root.Load(parent, struct{}{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parentCtx == nil {
+		t.Fatal("parent did not capture its context")
+	}
+
+	restarted := make(chan struct{})
+	go func() {
+		defer close(restarted)
+		if err := parentFiber.Restart(); err != nil {
+			t.Error(err)
+		}
+	}()
+	select {
+	case <-unloading:
+	case <-time.After(2 * time.Second):
+		t.Fatal("parent did not start unloading")
+	}
+	waitFiberState(t, parentFiber, cordis.StateUnloading)
+
+	child := cordis.Define[struct{}]("child", func(*cordis.Context, struct{}) error { return nil })
+	if _, err := parentCtx.Load(child, struct{}{}); err == nil {
+		t.Fatal("want a load on an unloading parent to fail, got nil")
+	}
+	if names := registry.Plugins(); len(names) != 1 || names[0] != "parent" {
+		t.Fatalf("want plugins [parent] after the failed load, got %v", names)
+	}
+	if size := registry.Size(); size != 1 {
+		t.Fatalf("want registry size 1 after the failed load, got %d", size)
+	}
+
+	close(releaseParent)
+	select {
+	case <-restarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("parent restart did not finish")
+	}
+	parentFiber.Dispose()
+	if size := registry.Size(); size != 0 {
+		t.Fatalf("want registry size 0 after dispose, got %d", size)
+	}
+}
+
+// TestFailedLoadThenReloadLeavesNoResidue pins the retry path: after a load was
+// rejected on an unloading parent, the host must be able to load the same
+// definition again and end up with exactly the entries a first-time load would
+// leave, so a failed load must not leak a claim onto a stale runtime either.
+func TestFailedLoadThenReloadLeavesNoResidue(t *testing.T) {
+	root := cordis.New()
+	registry, ok := cordis.Get[cordis.Registry](root, "registry")
+	if !ok {
+		t.Fatal("registry service missing")
+	}
+
+	var parentCtx *cordis.Context
+	unloading := make(chan struct{})
+	releaseParent := make(chan struct{})
+	var blockOnce sync.Once
+	parent := cordis.Define[struct{}]("parent", func(ctx *cordis.Context, _ struct{}) error {
+		parentCtx = ctx
+		ctx.OnDispose(func() {
+			// Block only the first unload so the restart can complete later.
+			blockOnce.Do(func() {
+				close(unloading)
+				<-releaseParent
+			})
+		})
+		return nil
+	})
+	parentFiber, err := root.Load(parent, struct{}{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parentCtx == nil {
+		t.Fatal("parent did not capture its context")
+	}
+
+	restarted := make(chan struct{})
+	go func() {
+		defer close(restarted)
+		if err := parentFiber.Restart(); err != nil {
+			t.Error(err)
+		}
+	}()
+	select {
+	case <-unloading:
+	case <-time.After(2 * time.Second):
+		t.Fatal("parent did not start unloading")
+	}
+	waitFiberState(t, parentFiber, cordis.StateUnloading)
+
+	child := cordis.Define[struct{}]("child", func(*cordis.Context, struct{}) error { return nil })
+	if _, err := parentCtx.Load(child, struct{}{}); err == nil {
+		t.Fatal("want a load on an unloading parent to fail, got nil")
+	}
+	if size := registry.Size(); size != 1 {
+		t.Fatalf("want registry size 1 after the failed load, got %d", size)
+	}
+
+	close(releaseParent)
+	select {
+	case <-restarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("parent restart did not finish")
+	}
+
+	retry, err := parentCtx.Load(child, struct{}{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFiberState(t, retry, cordis.StateActive)
+	if size := registry.Size(); size != 2 {
+		t.Fatalf("want registry size 2 after the retried load, got %d", size)
+	}
+	retry.Dispose()
+	if size := registry.Size(); size != 1 {
+		t.Fatalf("want registry size 1 after disposing the retried fiber, got %d", size)
+	}
+
+	parentFiber.Dispose()
+	if size := registry.Size(); size != 0 {
+		t.Fatalf("want registry size 0 after dispose, got %d", size)
+	}
+	// A disposed parent rejects loads before a runtime is ever claimed, so the
+	// rejection must not re-register anything either.
+	if _, err := parentCtx.Load(child, struct{}{}); err == nil {
+		t.Fatal("want a load on a disposed parent to fail, got nil")
+	}
+	if size := registry.Size(); size != 0 {
+		t.Fatalf("want registry size 0 after the rejected load, got %d", size)
+	}
+}
+
+// TestFailedLoadKeepsRuntimeOfLiveSiblingFiber pins the fibers half of the
+// claim guard: a failed load must not unregister the runtime that a live fiber
+// of the same definition still uses, or the registry would lose a running
+// plugin and its later dispose could not remove the entry again.
+func TestFailedLoadKeepsRuntimeOfLiveSiblingFiber(t *testing.T) {
+	root := cordis.New()
+	registry, ok := cordis.Get[cordis.Registry](root, "registry")
+	if !ok {
+		t.Fatal("registry service missing")
+	}
+
+	child := cordis.Define[struct{}]("child", func(*cordis.Context, struct{}) error { return nil })
+	sibling, err := root.Load(child, struct{}{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFiberState(t, sibling, cordis.StateActive)
+
+	var parentCtx *cordis.Context
+	unloading := make(chan struct{})
+	releaseParent := make(chan struct{})
+	var blockOnce sync.Once
+	parent := cordis.Define[struct{}]("parent", func(ctx *cordis.Context, _ struct{}) error {
+		parentCtx = ctx
+		ctx.OnDispose(func() {
+			blockOnce.Do(func() {
+				close(unloading)
+				<-releaseParent
+			})
+		})
+		return nil
+	})
+	parentFiber, err := root.Load(parent, struct{}{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	restarted := make(chan struct{})
+	go func() {
+		defer close(restarted)
+		if err := parentFiber.Restart(); err != nil {
+			t.Error(err)
+		}
+	}()
+	select {
+	case <-unloading:
+	case <-time.After(2 * time.Second):
+		t.Fatal("parent did not start unloading")
+	}
+	waitFiberState(t, parentFiber, cordis.StateUnloading)
+
+	if _, err := parentCtx.Load(child, struct{}{}); err == nil {
+		t.Fatal("want a load on an unloading parent to fail, got nil")
+	}
+	if sibling.State() != cordis.StateActive {
+		t.Fatalf("want the sibling fiber to stay active, got %s", sibling.State())
+	}
+	names := registry.Plugins()
+	if len(names) != 2 || !slices.Contains(names, "child") || !slices.Contains(names, "parent") {
+		t.Fatalf("want plugins [child parent] while the sibling lives, got %v", names)
+	}
+
+	close(releaseParent)
+	select {
+	case <-restarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("parent restart did not finish")
+	}
+	parentFiber.Dispose()
+	if size := registry.Size(); size != 1 {
+		t.Fatalf("want registry size 1 after the parent dispose, got %d", size)
+	}
+	if names := registry.Plugins(); len(names) != 1 || names[0] != "child" {
+		t.Fatalf("want plugins [child] after the parent dispose, got %v", names)
+	}
+
+	sibling.Dispose()
+	if size := registry.Size(); size != 0 {
+		t.Fatalf("want registry size 0 after the sibling dispose, got %d", size)
+	}
+}
+
+// TestConcurrentLoadAndFailedLoadOfSamePlugin pins the claim arithmetic under
+// contention: while one goroutine's load of a definition is rejected on an
+// unloading parent, a concurrent load of the same definition must attach
+// normally, and exactly one registry entry must survive. Race detector fodder.
+func TestConcurrentLoadAndFailedLoadOfSamePlugin(t *testing.T) {
+	root := cordis.New()
+	registry, ok := cordis.Get[cordis.Registry](root, "registry")
+	if !ok {
+		t.Fatal("registry service missing")
+	}
+
+	var parentCtx *cordis.Context
+	unloading := make(chan struct{})
+	releaseParent := make(chan struct{})
+	var blockOnce sync.Once
+	parent := cordis.Define[struct{}]("parent", func(ctx *cordis.Context, _ struct{}) error {
+		parentCtx = ctx
+		ctx.OnDispose(func() {
+			blockOnce.Do(func() {
+				close(unloading)
+				<-releaseParent
+			})
+		})
+		return nil
+	})
+	parentFiber, err := root.Load(parent, struct{}{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	restarted := make(chan struct{})
+	go func() {
+		defer close(restarted)
+		if err := parentFiber.Restart(); err != nil {
+			t.Error(err)
+		}
+	}()
+	select {
+	case <-unloading:
+	case <-time.After(2 * time.Second):
+		t.Fatal("parent did not start unloading")
+	}
+	waitFiberState(t, parentFiber, cordis.StateUnloading)
+
+	child := cordis.Define[struct{}]("child", func(*cordis.Context, struct{}) error { return nil })
+	var wg sync.WaitGroup
+	rejected := make(chan error, 1)
+	loaded := make(chan *cordis.Fiber, 1)
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		_, err := parentCtx.Load(child, struct{}{})
+		rejected <- err
+	}()
+	go func() {
+		defer wg.Done()
+		fiber, err := root.Load(child, struct{}{})
+		if err != nil {
+			t.Error(err)
+			loaded <- nil
+			return
+		}
+		loaded <- fiber
+	}()
+	wg.Wait()
+
+	if err := <-rejected; err == nil {
+		t.Error("want the load on the unloading parent to fail, got nil")
+	}
+	survivor := <-loaded
+	if survivor == nil {
+		t.Fatal("want the concurrent load on the root to succeed")
+	}
+	waitFiberState(t, survivor, cordis.StateActive)
+	names := registry.Plugins()
+	if len(names) != 2 || !slices.Contains(names, "child") || !slices.Contains(names, "parent") {
+		t.Fatalf("want plugins [child parent] after both loads, got %v", names)
+	}
+
+	survivor.Dispose()
+	if size := registry.Size(); size != 1 {
+		t.Fatalf("want registry size 1 after disposing the survivor, got %d", size)
+	}
+
+	close(releaseParent)
+	select {
+	case <-restarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("parent restart did not finish")
+	}
+	parentFiber.Dispose()
+	if size := registry.Size(); size != 0 {
+		t.Fatalf("want registry size 0 after dispose, got %d", size)
 	}
 }
 

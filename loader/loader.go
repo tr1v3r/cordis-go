@@ -160,6 +160,9 @@ func Compose(layers []Layer, opts ...ComposeOption) (*Tree, error) {
 	}
 
 	for _, layer := range layers {
+		if err := validateLayer(layer); err != nil {
+			return nil, err
+		}
 		composer.tree.Layers = append(composer.tree.Layers, layer.Label)
 		for _, entry := range layer.Entries {
 			var err error
@@ -173,7 +176,112 @@ func Compose(layers []Layer, opts ...ComposeOption) (*Tree, error) {
 			}
 		}
 	}
+	// A non-group entry's children are never loaded, but they still take part in
+	// the composed tree: they are counted, dumped and indexed. Say so after the
+	// whole tree exists, because a later layer may turn the entry into a group.
+	if err := composer.checkNonGroupChildren(); err != nil {
+		return nil, err
+	}
 	return composer.tree, nil
+}
+
+// checkNonGroupChildren reports every entry that carries children without being
+// a group: Load only recurses into groups, so such children are dropped without
+// a trace unless Compose speaks up.
+func (c *treeComposer) checkNonGroupChildren() error {
+	var walk func(nodes []*Node) error
+	walk = func(nodes []*Node) error {
+		for _, node := range nodes {
+			if node == nil {
+				continue
+			}
+			if len(node.Children) > 0 && !node.Group {
+				message := fmt.Sprintf(
+					"entry %q has plugins but is not a group: they will not be loaded",
+					nodeLabel(node))
+				if c.options.strict {
+					return fmt.Errorf("layer %s: %s", node.Source, message)
+				}
+				c.tree.Warnings = append(c.tree.Warnings, message)
+			}
+			if err := walk(node.Children); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	return walk(c.tree.Nodes)
+}
+
+// nodeLabel names a node in a diagnostic: its id, else its name, else a
+// placeholder, because an entry may carry neither.
+func nodeLabel(node *Node) string {
+	if node.ID != "" {
+		return node.ID
+	}
+	if node.Name != "" {
+		return node.Name
+	}
+	return "<unnamed>"
+}
+
+// validateLayer rejects entries that carry "insert" together with fields of a
+// normal entry, in whatever layer and at whatever depth they appear.
+//
+// Neither applyBase nor applyPatch can honour both halves of such an entry: the
+// base path drops the outer entry, the patch path drops everything but the
+// insert - including the "patch id matched no entry" warning the author would
+// need to notice it. Failing loudly is the only way to keep half a config from
+// disappearing.
+func validateLayer(layer Layer) error {
+	for _, entry := range layer.Entries {
+		if err := validateEntry(layer.Label, entry); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateEntry(source string, entry *Patch) error {
+	if entry == nil {
+		return nil
+	}
+	if len(entry.Insert) > 0 && declaresEntryFields(entry) {
+		return fmt.Errorf(
+			"layer %s: entry %q declares both insert and other fields; split it into two entries",
+			source, entryLabel(entry))
+	}
+	for _, child := range entry.Plugins {
+		if err := validateEntry(source, child); err != nil {
+			return err
+		}
+	}
+	for _, inserted := range entry.Insert {
+		if err := validateEntry(source, inserted); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// declaresEntryFields reports whether an entry carries anything that only makes
+// sense without "insert".
+func declaresEntryFields(entry *Patch) bool {
+	return entry.ID != "" || entry.Name != nil || entry.Label != nil ||
+		entry.Disabled != nil || entry.Group != nil || entry.Inject != nil ||
+		entry.Config != nil || len(entry.Plugins) > 0
+}
+
+// entryLabel names an entry in a diagnostic: its id, else its name, else a
+// placeholder, because a malformed entry may carry neither.
+func entryLabel(entry *Patch) string {
+	if entry.ID != "" {
+		return entry.ID
+	}
+	if entry.Name != nil && *entry.Name != "" {
+		return *entry.Name
+	}
+	return "<unnamed>"
 }
 
 // applyBase creates entries for a base layer.
@@ -189,17 +297,17 @@ func (c *treeComposer) applyBase(source string, targetNodes *[]*Node, entry *Pat
 		if baseEntry == nil {
 			continue
 		}
-		if baseEntry.ID == "" && baseEntry.Name == nil {
-			return fmt.Errorf("layer %s: entry requires id or name", source)
+		node, err := createNode(baseEntry, source, "entry")
+		if err != nil {
+			return err
 		}
-		if baseEntry.ID != "" {
-			if _, exists := c.index[baseEntry.ID]; exists {
-				return fmt.Errorf("layer %s: duplicate entry id %q", source, baseEntry.ID)
-			}
-		}
-		node := createNode(baseEntry, source)
 		*targetNodes = append(*targetNodes, node)
-		c.indexNode(node)
+		// Duplicates are reported by indexNode, which sees nested children too.
+		// Keeping one path for every creation site also keeps the outcome
+		// independent of the order the entries happen to appear in.
+		if err := c.indexNode(node); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -213,9 +321,6 @@ func (c *treeComposer) applyPatch(source string, targetNodes *[]*Node, patch *Pa
 			if insertedEntry == nil {
 				continue
 			}
-			if insertedEntry.ID == "" && insertedEntry.Name == nil {
-				return fmt.Errorf("layer %s: inserted entry requires id or name", source)
-			}
 			if insertedEntry.ID != "" {
 				if _, exists := c.index[insertedEntry.ID]; exists {
 					message := fmt.Sprintf("layer %s: duplicate entry id %q",
@@ -227,9 +332,14 @@ func (c *treeComposer) applyPatch(source string, targetNodes *[]*Node, patch *Pa
 					continue
 				}
 			}
-			node := createNode(insertedEntry, source)
+			node, err := createNode(insertedEntry, source, "inserted entry")
+			if err != nil {
+				return err
+			}
 			*targetNodes = append(*targetNodes, node)
-			c.indexNode(node)
+			if err := c.indexNode(node); err != nil {
+				return err
+			}
 		}
 		return nil
 	}
@@ -254,33 +364,67 @@ func (c *treeComposer) applyPatch(source string, targetNodes *[]*Node, patch *Pa
 	return nil
 }
 
-func createNode(patch *Patch, source string) *Node {
-	node := &Node{ID: patch.ID, Source: source}
-	if patch.Name != nil {
-		node.Name = *patch.Name
+// createNode builds one node from an entry. where locates the entry inside its
+// layer - "entry", "inserted entry", "entry plugins[1] insert[0]" - so an
+// unusable nested entry can be reported instead of turning into an anonymous
+// node that no id addresses and no plugin name resolves.
+func createNode(entry *Patch, source, where string) (*Node, error) {
+	if entry.ID == "" && !namesEntry(entry) {
+		return nil, fmt.Errorf("layer %s: %s requires id or name", source, where)
 	}
-	if patch.Label != nil {
-		node.Label = *patch.Label
+	node := &Node{ID: entry.ID, Source: source}
+	if entry.Name != nil {
+		node.Name = *entry.Name
 	}
-	if patch.Disabled != nil {
-		node.Disabled = *patch.Disabled
+	if entry.Label != nil {
+		node.Label = *entry.Label
 	}
-	if patch.Group != nil {
-		node.Group = *patch.Group
+	if entry.Disabled != nil {
+		node.Disabled = *entry.Disabled
 	}
-	if patch.Inject != nil {
-		node.Inject = append([]string(nil), (*patch.Inject)...)
+	if entry.Group != nil {
+		node.Group = *entry.Group
 	}
-	if patch.Config != nil {
-		node.Config = cloneMap(patch.Config)
+	if entry.Inject != nil {
+		node.Inject = append([]string(nil), (*entry.Inject)...)
 	}
-	for _, child := range patch.Plugins {
+	if entry.Config != nil {
+		node.Config = cloneMap(entry.Config)
+	}
+	for i, child := range entry.Plugins {
 		if child == nil {
 			continue
 		}
-		node.Children = append(node.Children, createNode(child, source))
+		childWhere := fmt.Sprintf("%s plugins[%d]", where, i)
+		if len(child.Insert) > 0 {
+			// A nested entry may insert instead of naming a plugin: it expands
+			// into sibling children, exactly as applyPatch expands it in a
+			// patch layer, so a base layer and a patch layer read the same.
+			for j, inserted := range child.Insert {
+				if inserted == nil {
+					continue
+				}
+				insertedNode, err := createNode(inserted, source,
+					fmt.Sprintf("%s insert[%d]", childWhere, j))
+				if err != nil {
+					return nil, err
+				}
+				node.Children = append(node.Children, insertedNode)
+			}
+			continue
+		}
+		childNode, err := createNode(child, source, childWhere)
+		if err != nil {
+			return nil, err
+		}
+		node.Children = append(node.Children, childNode)
 	}
-	return node
+	return node, nil
+}
+
+// namesEntry reports whether an entry carries a usable name.
+func namesEntry(entry *Patch) bool {
+	return entry.Name != nil && *entry.Name != ""
 }
 
 func mergePatch(node *Node, patch *Patch, source string) {
@@ -308,16 +452,31 @@ func mergePatch(node *Node, patch *Patch, source string) {
 
 // indexNode registers a node and all of its descendants in the global id
 // index, so a later layer can patch a nested group child by id.
-func (c *treeComposer) indexNode(node *Node) {
+//
+// The first node keeps the id. Overwriting it would send a later patch to one
+// node while Find and Dump keep reporting the other, so the tree would answer
+// "what is configured for x?" differently depending on who asks.
+func (c *treeComposer) indexNode(node *Node) error {
 	if node == nil {
-		return
+		return nil
 	}
 	if node.ID != "" {
-		c.index[node.ID] = node
+		if _, exists := c.index[node.ID]; exists {
+			message := fmt.Sprintf("layer %s: duplicate entry id %q", node.Source, node.ID)
+			if c.options.strict {
+				return fmt.Errorf("%s", message)
+			}
+			c.tree.Warnings = append(c.tree.Warnings, message)
+		} else {
+			c.index[node.ID] = node
+		}
 	}
 	for _, child := range node.Children {
-		c.indexNode(child)
+		if err := c.indexNode(child); err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
 // cloneMap copies a config map and the containers inside it, so a composed tree
@@ -466,9 +625,17 @@ func (r *Registry) Names() []string {
 	return names
 }
 
+// decodeConfig turns a map-based config into the plugin's own type by encoding
+// it back to JSON, so the target type's UnmarshalJSON runs and its defaults and
+// validation apply.
+//
+// A nil map means "no config" and leaves the target at its zero value. An empty
+// map is a config object like any other and must still reach the target type:
+// a pointer config gets allocated and a defaulted field gets its default, which
+// is exactly what a type with its own UnmarshalJSON expects for `config: {}`.
 func decodeConfig[C any](raw map[string]any) (C, error) {
 	var config C
-	if len(raw) == 0 {
+	if raw == nil {
 		return config, nil
 	}
 	data, err := json.Marshal(raw)
@@ -533,14 +700,24 @@ func (t *Tree) loadNodes(ctx *cordis.Context, registry *Registry, nodes []*Node,
 		if !ok {
 			return fmt.Errorf("loader: entry %q references unknown plugin %q", node.ID, node.Name)
 		}
+		if len(node.Children) > 0 {
+			// Only a group recurses into its children, so loading this entry
+			// would silently drop them: refuse instead of half-loading the tree.
+			return fmt.Errorf("loader: entry %q (%s): plugins require group: true",
+				node.ID, node.Name)
+		}
 		fiber, err := registeredPlugin.load(ctx, node.Config, deps)
 		if err != nil {
+			// A failed entry still owns a fiber: it holds a slot in the parent's
+			// effect tree and a runtime in the registry. Rollback below only
+			// walks the entries that loaded, so dispose this one here - a load
+			// error always comes with the fiber that reported it.
+			if fiber != nil {
+				fiber.Dispose()
+			}
+			// A failing entry is a configuration error: surface it so the caller
+			// sees all-or-nothing instead of a half-loaded tree.
 			return fmt.Errorf("loader: entry %q (%s): %w", node.ID, node.Name, err)
-		}
-		if fiber.State() == cordis.StateFailed {
-			// A failed plugin body is a configuration error too: surface it so
-			// the caller sees all-or-nothing instead of a half-loaded tree.
-			return fmt.Errorf("loader: entry %q (%s): %w", node.ID, node.Name, fiber.Error())
 		}
 		*fibers = append(*fibers, fiber)
 	}
