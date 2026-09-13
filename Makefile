@@ -10,7 +10,7 @@ GOFMT       ?= gofmt
 STATICCHECK ?= staticcheck
 REVIVE      ?= revive
 
-.PHONY: all fmt vet lint test tools ci
+.PHONY: all fmt fmt-check vet lint test tools ci
 
 all: ci
 
@@ -21,14 +21,17 @@ fmt:
 vet:
 	$(GO) vet ./...
 
-# Everything CI checks: formatting, vet, staticcheck, revive.
-lint: vet
+# Fail if any Go source is not gofmt-formatted.
+fmt-check:
 	@unformatted="$$($(GOFMT) -l .)"; \
 	if [ -n "$$unformatted" ]; then \
 		echo "gofmt would rewrite:"; \
 		echo "$$unformatted"; \
 		exit 1; \
 	fi
+
+# Everything lint covers besides formatting: vet, staticcheck, revive.
+lint: vet
 	$(STATICCHECK) ./...
 	$(REVIVE) -config .revive.toml ./...
 
@@ -40,4 +43,4 @@ tools:
 	$(GO) install honnef.co/go/tools/cmd/staticcheck@v0.8.1
 	$(GO) install github.com/mgechev/revive@v1.16.0
 
-ci: lint test
+ci: fmt-check lint test
