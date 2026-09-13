@@ -650,6 +650,10 @@ func (f *Fiber) resolveInjections() (map[string]*serviceBinding, string) {
 	return resolved, builder.String()
 }
 
+// load runs one plugin generation from a dependency snapshot resolved by plan.
+//
+// The caller is the refresh owner. load still re-checks disposed and provider
+// liveness because callbacks and concurrent disposal can invalidate the plan.
 func (f *Fiber) load(resolved map[string]*serviceBinding) {
 	f.mu.Lock()
 	if f.disposed {
@@ -727,6 +731,10 @@ func (f *Fiber) fail(err error) {
 	f.shared().log.errorf("cordis: plugin %s failed to load: %v", f.Name(), err)
 }
 
+// unload releases the current generation of effects.
+//
+// The caller is the refresh owner. unload is idempotent: a disposed fiber
+// finishes through finalizeDispose, otherwise it returns to pending.
 func (f *Fiber) unload() {
 	f.mu.Lock()
 	if f.cleaned {
