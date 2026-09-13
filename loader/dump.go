@@ -73,7 +73,7 @@ func dumpNode(builder *strings.Builder, node *Node, indent string) {
 	if len(node.Inject) > 0 {
 		fmt.Fprintf(builder, "%s  inject: %s\n", indent, quoteList(node.Inject))
 	}
-	if len(node.Config) > 0 {
+	if node.Config != nil {
 		fmt.Fprintf(builder, "%s  config: %s\n", indent, dumpConfig(node.Config))
 	}
 	if hasNodes(node.Children) {
