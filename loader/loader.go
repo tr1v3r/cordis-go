@@ -567,12 +567,16 @@ func (t *Tree) loadNodes(ctx *cordis.Context, registry *Registry, nodes []*Node,
 		}
 		fiber, err := registeredPlugin.load(ctx, node.Config, deps)
 		if err != nil {
+			// A failed entry still owns a fiber: it holds a slot in the parent's
+			// effect tree and a runtime in the registry. Rollback below only
+			// walks the entries that loaded, so dispose this one here - a load
+			// error always comes with the fiber that reported it.
+			if fiber != nil {
+				fiber.Dispose()
+			}
+			// A failing entry is a configuration error: surface it so the caller
+			// sees all-or-nothing instead of a half-loaded tree.
 			return fmt.Errorf("loader: entry %q (%s): %w", node.ID, node.Name, err)
-		}
-		if fiber.State() == cordis.StateFailed {
-			// A failed plugin body is a configuration error too: surface it so
-			// the caller sees all-or-nothing instead of a half-loaded tree.
-			return fmt.Errorf("loader: entry %q (%s): %w", node.ID, node.Name, fiber.Error())
 		}
 		*fibers = append(*fibers, fiber)
 	}
