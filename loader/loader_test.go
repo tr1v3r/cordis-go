@@ -618,3 +618,94 @@ func TestComposeKeepsPureInsert(t *testing.T) {
 		}
 	}
 }
+
+// TestComposeBaseNestedInsertExpands pins base-layer parity with patch layers:
+// a nested entry carrying "insert" creates its entries instead of a ghost node
+// with no id and no name, which no patch could address and Load could not
+// resolve to a plugin.
+func TestComposeBaseNestedInsertExpands(t *testing.T) {
+	registry := loader.NewRegistry()
+	loader.MustRegister(registry, "p",
+		cordis.Define[struct{}]("p", func(*cordis.Context, struct{}) error { return nil }))
+
+	layer := loader.Layer{Label: "base", Entries: []*loader.Patch{{
+		ID: "grp", Group: boolptr(true), Plugins: []*loader.Patch{{
+			Insert: []*loader.Patch{{ID: "c", Name: strptr("p")}},
+		}},
+	}}}
+	tree, err := loader.Compose([]loader.Layer{layer})
+	if err != nil {
+		t.Fatal(err)
+	}
+	node := tree.Find("c")
+	if node == nil {
+		t.Fatal("want a nested insert to create the entry it declares")
+	}
+	if node.Name != "p" {
+		t.Fatalf("want the inserted entry to be named %q, got %q", "p", node.Name)
+	}
+	if tree.Size() != 2 {
+		t.Fatalf("want 2 entries, got %d", tree.Size())
+	}
+	if dump := tree.DumpString(); strings.Contains(dump, `- name: ""`) {
+		t.Fatalf("want no anonymous entry in the dump:\n%s", dump)
+	}
+	fibers, err := tree.Load(cordis.New(), registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fibers) != 1 {
+		t.Fatalf("want 1 loaded entry, got %d", len(fibers))
+	}
+}
+
+// TestComposeRejectsEntryWithoutIDOrName pins the other half: an entry that can
+// be created without an id must carry a name, at any depth and in any layer.
+func TestComposeRejectsEntryWithoutIDOrName(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		patch bool
+		entry *loader.Patch
+		want  string
+	}{
+		{
+			name:  "top level",
+			entry: &loader.Patch{Name: strptr("")},
+			want:  "layer base: entry requires id or name",
+		},
+		{
+			name: "nested",
+			entry: &loader.Patch{ID: "grp", Group: boolptr(true),
+				Plugins: []*loader.Patch{{Name: strptr("")}}},
+			want: "layer base: entry plugins[0] requires id or name",
+		},
+		{
+			name: "nested insert",
+			entry: &loader.Patch{ID: "grp", Group: boolptr(true), Plugins: []*loader.Patch{{
+				Insert: []*loader.Patch{{Name: strptr("")}},
+			}}},
+			want: "layer base: entry plugins[0] insert[0] requires id or name",
+		},
+		{
+			name:  "inserted",
+			patch: true,
+			entry: &loader.Patch{Insert: []*loader.Patch{{Name: strptr("")}}},
+			want:  "layer p: inserted entry requires id or name",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			label := "base"
+			if tc.patch {
+				label = "p"
+			}
+			layer := loader.Layer{Label: label, Patch: tc.patch, Entries: []*loader.Patch{tc.entry}}
+			_, err := loader.Compose([]loader.Layer{layer})
+			if err == nil {
+				t.Fatal("want an error: a created entry needs an id or a name")
+			}
+			if err.Error() != tc.want {
+				t.Fatalf("want %q, got %q", tc.want, err)
+			}
+		})
+	}
+}
