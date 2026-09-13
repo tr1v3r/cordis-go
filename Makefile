@@ -10,7 +10,7 @@ GOFMT       ?= gofmt
 STATICCHECK ?= staticcheck
 REVIVE      ?= revive
 
-.PHONY: all fmt vet lint test integration tools ci
+.PHONY: all fmt vet lint test integration fuzz tools ci
 
 all: ci
 
@@ -41,6 +41,12 @@ test:
 # answered from the test cache; -count=3 forces real reruns so flakes surface.
 integration:
 	$(GO) test -race -count=3 ./...
+
+# Fuzz the loader configuration path for a bounded time. go test runs one
+# -fuzz target per invocation, so this names the target; the seed corpus runs
+# on every plain `go test` as ordinary regression cases.
+fuzz:
+	$(GO) test -fuzz=FuzzCompose -fuzztime=30s -run '^$$' ./loader
 
 # Install the lint tools at the versions this repository is verified against.
 tools:
