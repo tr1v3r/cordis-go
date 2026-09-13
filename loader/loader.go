@@ -160,6 +160,9 @@ func Compose(layers []Layer, opts ...ComposeOption) (*Tree, error) {
 	}
 
 	for _, layer := range layers {
+		if err := validateLayer(layer); err != nil {
+			return nil, err
+		}
 		composer.tree.Layers = append(composer.tree.Layers, layer.Label)
 		for _, entry := range layer.Entries {
 			var err error
@@ -218,6 +221,65 @@ func nodeLabel(node *Node) string {
 	}
 	if node.Name != "" {
 		return node.Name
+	}
+	return "<unnamed>"
+}
+
+// validateLayer rejects entries that carry "insert" together with fields of a
+// normal entry, in whatever layer and at whatever depth they appear.
+//
+// Neither applyBase nor applyPatch can honour both halves of such an entry: the
+// base path drops the outer entry, the patch path drops everything but the
+// insert - including the "patch id matched no entry" warning the author would
+// need to notice it. Failing loudly is the only way to keep half a config from
+// disappearing.
+func validateLayer(layer Layer) error {
+	for _, entry := range layer.Entries {
+		if err := validateEntry(layer.Label, entry); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateEntry(source string, entry *Patch) error {
+	if entry == nil {
+		return nil
+	}
+	if len(entry.Insert) > 0 && declaresEntryFields(entry) {
+		return fmt.Errorf(
+			"layer %s: entry %q declares both insert and other fields; split it into two entries",
+			source, entryLabel(entry))
+	}
+	for _, child := range entry.Plugins {
+		if err := validateEntry(source, child); err != nil {
+			return err
+		}
+	}
+	for _, inserted := range entry.Insert {
+		if err := validateEntry(source, inserted); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// declaresEntryFields reports whether an entry carries anything that only makes
+// sense without "insert".
+func declaresEntryFields(entry *Patch) bool {
+	return entry.ID != "" || entry.Name != nil || entry.Label != nil ||
+		entry.Disabled != nil || entry.Group != nil || entry.Inject != nil ||
+		entry.Config != nil || len(entry.Plugins) > 0
+}
+
+// entryLabel names an entry in a diagnostic: its id, else its name, else a
+// placeholder, because a malformed entry may carry neither.
+func entryLabel(entry *Patch) string {
+	if entry.ID != "" {
+		return entry.ID
+	}
+	if entry.Name != nil && *entry.Name != "" {
+		return *entry.Name
 	}
 	return "<unnamed>"
 }

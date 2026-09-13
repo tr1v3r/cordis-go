@@ -528,3 +528,93 @@ func shadowNode(tree *loader.Tree, keeper *loader.Node) *loader.Node {
 	}
 	return walk(tree.Nodes)
 }
+
+// TestComposeRejectsMixedInsert pins the loud rejection of an entry that
+// declares "insert" and something else at once. Such an entry loses one half of
+// what it says - the base path drops the entry itself, the patch path drops the
+// patch and its warnings - so it has to be a configuration error instead.
+func TestComposeRejectsMixedInsert(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		patch bool
+		entry *loader.Patch
+		want  string
+	}{
+		{
+			name: "base entry",
+			entry: &loader.Patch{ID: "a", Name: strptr("db"),
+				Insert: []*loader.Patch{{ID: "b", Name: strptr("db")}}},
+			want: `layer base: entry "a" declares both insert and other fields;` +
+				` split it into two entries`,
+		},
+		{
+			name:  "patch entry",
+			patch: true,
+			entry: &loader.Patch{ID: "a", Config: map[string]any{"path": "x"},
+				Insert: []*loader.Patch{{ID: "b", Name: strptr("db")}}},
+			want: `layer p: entry "a" declares both insert and other fields;` +
+				` split it into two entries`,
+		},
+		{
+			name:  "unnamed entry",
+			entry: &loader.Patch{Name: strptr(""), Insert: []*loader.Patch{{ID: "b"}}},
+			want: `layer base: entry "<unnamed>" declares both insert and other fields;` +
+				` split it into two entries`,
+		},
+		{
+			name: "insert with inject",
+			entry: &loader.Patch{Inject: &[]string{"db"},
+				Insert: []*loader.Patch{{ID: "b", Name: strptr("db")}}},
+			want: `layer base: entry "<unnamed>" declares both insert and other fields;` +
+				` split it into two entries`,
+		},
+		{
+			name: "nested entry",
+			entry: &loader.Patch{ID: "grp", Group: boolptr(true), Plugins: []*loader.Patch{
+				{ID: "b", Insert: []*loader.Patch{{ID: "c"}}},
+			}},
+			want: `layer base: entry "b" declares both insert and other fields;` +
+				` split it into two entries`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			label := "base"
+			if tc.patch {
+				label = "p"
+			}
+			layer := loader.Layer{Label: label, Patch: tc.patch, Entries: []*loader.Patch{tc.entry}}
+			_, err := loader.Compose([]loader.Layer{layer})
+			if err == nil {
+				t.Fatal("want an error: an entry cannot insert and declare fields at once")
+			}
+			if err.Error() != tc.want {
+				t.Fatalf("want %q, got %q", tc.want, err)
+			}
+		})
+	}
+}
+
+// TestComposeKeepsPureInsert is the regression guard for the rejection above:
+// an entry carrying nothing but "insert" keeps creating entries, in base layers
+// as well as in patch layers.
+func TestComposeKeepsPureInsert(t *testing.T) {
+	base := loader.Layer{Label: "base", Entries: []*loader.Patch{{
+		Insert: []*loader.Patch{{ID: "a", Name: strptr("db")}},
+	}}}
+	patch := loader.Layer{Label: "p", Patch: true, Entries: []*loader.Patch{{
+		Insert: []*loader.Patch{{ID: "b", Name: strptr("db")}},
+	}}}
+
+	tree, err := loader.Compose([]loader.Layer{base, patch})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tree.Size() != 2 {
+		t.Fatalf("want 2 inserted entries, got %d", tree.Size())
+	}
+	for _, id := range []string{"a", "b"} {
+		if tree.Find(id) == nil {
+			t.Fatalf("want inserted entry %q to exist", id)
+		}
+	}
+}
