@@ -68,6 +68,75 @@ func TestComposeUnmatchedIDWarnsAndStrictFails(t *testing.T) {
 	}
 }
 
+// TestComposeNonGroupChildrenCheckedAfterAllLayers pins why the check runs on
+// the finished tree instead of at entry creation: a later layer can still turn
+// the entry into a group, and it can also be the layer that adds the children.
+func TestComposeNonGroupChildrenCheckedAfterAllLayers(t *testing.T) {
+	t.Run("cured by a group patch", func(t *testing.T) {
+		base := loader.Layer{Label: "base", Entries: []*loader.Patch{{
+			ID: "parent", Name: strptr("db"),
+			Plugins: []*loader.Patch{{ID: "child", Name: strptr("db")}},
+		}}}
+		patch := loader.Layer{Label: "profile", Patch: true, Entries: []*loader.Patch{{
+			ID: "parent", Group: boolptr(true),
+		}}}
+
+		tree, err := loader.Compose([]loader.Layer{base, patch}, loader.Strict())
+		if err != nil {
+			t.Fatalf("want the later group patch to cure the entry, got %v", err)
+		}
+		parent := tree.Find("parent")
+		if parent == nil || !parent.Group {
+			t.Fatalf("want the patch to make the entry a group, got %+v", parent)
+		}
+		if len(tree.Warnings) != 0 {
+			t.Fatalf("want no warnings, got %v", tree.Warnings)
+		}
+	})
+
+	t.Run("children added by a later layer", func(t *testing.T) {
+		base := loader.Layer{Label: "base", Entries: []*loader.Patch{{
+			ID: "parent", Name: strptr("db"),
+		}}}
+		patch := loader.Layer{Label: "profile", Patch: true, Entries: []*loader.Patch{{
+			ID: "parent",
+			Plugins: []*loader.Patch{{
+				Insert: []*loader.Patch{{ID: "child", Name: strptr("db")}},
+			}},
+		}}}
+
+		tree, err := loader.Compose([]loader.Layer{base, patch})
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := `entry "parent" has plugins but is not a group: they will not be loaded`
+		if len(tree.Warnings) != 1 || tree.Warnings[0] != want {
+			t.Fatalf("want exactly one warning %q, got %v", want, tree.Warnings)
+		}
+		if _, err := loader.Compose([]loader.Layer{base, patch}, loader.Strict()); err == nil {
+			t.Fatal("strict composition must reject plugins on a non-group entry")
+		}
+	})
+
+	t.Run("nested below a group", func(t *testing.T) {
+		layer := loader.Layer{Label: "base", Entries: []*loader.Patch{{
+			ID: "grp", Group: boolptr(true), Plugins: []*loader.Patch{{
+				ID: "mid", Name: strptr("db"),
+				Plugins: []*loader.Patch{{ID: "leaf", Name: strptr("db")}},
+			}},
+		}}}
+
+		tree, err := loader.Compose([]loader.Layer{layer})
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := `entry "mid" has plugins but is not a group: they will not be loaded`
+		if len(tree.Warnings) != 1 || tree.Warnings[0] != want {
+			t.Fatalf("want the warning to name the nested entry, got %v", tree.Warnings)
+		}
+	})
+}
+
 func TestComposeInsertAddsEntries(t *testing.T) {
 	base := loader.Layer{Label: "base", Entries: []*loader.Patch{{
 		ID: "a", Name: strptr("db"),
