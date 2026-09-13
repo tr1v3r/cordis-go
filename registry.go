@@ -133,6 +133,14 @@ func load(parentCtx *Context, definition definition, config any, extra []string)
 	if definition == nil {
 		return nil, newError(ErrInvalidPlugin, "nil plugin definition")
 	}
+	kind := reflect.TypeOf(definition)
+	if kind == nil || kind.Kind() != reflect.Pointer || !kind.Comparable() {
+		return nil, newError(ErrInvalidPlugin,
+			"plugin definition must be a comparable pointer, got %T", definition)
+	}
+	if reflect.ValueOf(definition).IsNil() {
+		return nil, newError(ErrInvalidPlugin, "nil plugin definition")
+	}
 	if err := parentCtx.fiber.assertActive(); err != nil {
 		return nil, err
 	}
@@ -217,9 +225,9 @@ func (d *injectDefinition) Run(ctx *Context, _ any) error  { return d.body(ctx) 
 // Inject runs body once every service in deps is available, reloading it
 // whenever a provider changes. It is the Go form of ctx.inject().
 func Inject(parentCtx *Context, deps []string, body func(*Context) error) (*Fiber, error) {
-	name := "inject"
-	if body != nil {
-		name = fmt.Sprintf("inject#%p", body)
+	if body == nil {
+		return nil, newError(ErrInvalidPlugin, "inject body must not be nil")
 	}
+	name := fmt.Sprintf("inject#%p", body)
 	return load(parentCtx, &injectDefinition{name: name, deps: deps, body: body}, nil, nil)
 }
