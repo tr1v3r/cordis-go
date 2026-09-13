@@ -495,8 +495,7 @@ func (f *Fiber) reload() {
 	f.mu.Lock()
 	if f.disposed {
 		f.mu.Unlock()
-		// The first unload may have raced with Dispose; finalize is idempotent.
-		f.finalizeDispose()
+		// Dispose set dirty; the refresh owner will run the dispose action next.
 		return
 	}
 	f.epoch = epochInactive
