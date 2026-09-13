@@ -67,21 +67,13 @@ func (f *Fiber) claimDispose() (busy, already bool) {
 	return false, false
 }
 
-// transitionRequest captures the volatile requests observed at the start of a
-// transition pass.
-type transitionRequest struct {
-	disposed    bool
-	forceReload bool
-}
-
-// takeRequest consumes pending transition requests under the fiber lock.
-func (f *Fiber) takeRequest() transitionRequest {
+// takeRequest consumes pending transition requests under the fiber lock. It
+// reports whether the fiber is disposed and whether a forced reload is pending.
+func (f *Fiber) takeRequest() (disposed, forceReload bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	req := transitionRequest{
-		disposed:    f.disposed,
-		forceReload: f.forceReload,
-	}
+	disposed = f.disposed
+	forceReload = f.forceReload
 	f.forceReload = false
-	return req
+	return
 }

@@ -387,11 +387,11 @@ func (f *Fiber) plan() fiberPlan {
 		return fiberPlan{action: actionNoop}
 	}
 
-	req := f.takeRequest()
-	if req.disposed {
+	disposed, forceReload := f.takeRequest()
+	if disposed {
 		return fiberPlan{action: actionDispose}
 	}
-	if req.forceReload {
+	if forceReload {
 		return fiberPlan{action: actionReload}
 	}
 
