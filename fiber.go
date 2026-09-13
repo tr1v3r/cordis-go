@@ -545,7 +545,7 @@ func (f *Fiber) resolveInjections() (map[string]*serviceBinding, string) {
 	bindings := make(map[string]*serviceBinding, len(names))
 	var builder strings.Builder
 	for _, name := range names {
-		binding := f.shared().lookupService(f.Ctx.isolateLabel(name))
+		binding := f.shared().lookupService(f.Ctx.isolateLabel(name), name)
 		if binding == nil {
 			return nil, epochInactive
 		}
