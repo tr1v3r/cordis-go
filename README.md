@@ -98,12 +98,8 @@ pending ──依赖就绪──> loading ──成功──> active
 `Load` 已经用 `err` 报过一次，`fiber.Error()` 保存同一个错误，直到下次加载成功才清空。
 
 `fiber.Dispose()` 会立即取消 `ctx.Context()`；如果调用时已有 refresh transition 在跑，
-effect 回收会延后到该循环。此时可以等待 `fiber.Disposed()`，它在 fiber 进入 `disposed`
-状态后关闭。
-
-注意：`Disposed()` 只覆盖当前 fiber 进入终态；如果 teardown 开始时还有正在初始化的
-effect body，或还有忙的子 fiber，它们的清理可能晚于 `Disposed()` 关闭。它不是整棵子树
-资源回收完成的屏障。
+effect 回收会延后到该循环。`Dispose()` 返回不代表所有 effect 已经回收完成；调用方不应
+依赖它作为资源回收完成的同步点。
 
 ### 3. Effect — 可逆副作用
 

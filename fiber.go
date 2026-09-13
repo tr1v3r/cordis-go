@@ -85,7 +85,6 @@ type Fiber struct {
 	current          *effectEntry
 
 	done                 chan struct{}
-	disposedDone         chan struct{}
 	lifecycleCtx         context.Context
 	cancel               context.CancelFunc
 	parentEffectDisposer Disposer
@@ -122,7 +121,6 @@ func newRootFiber(ctx *Context) *Fiber {
 		effects:          newDisposableList(),
 		hasEffects:       true,
 		done:             make(chan struct{}),
-		disposedDone:     make(chan struct{}),
 		lifecycleCtx:     lifecycleCtx,
 		cancel:           cancel,
 	}
@@ -141,7 +139,6 @@ func newFiber(parentCtx *Context, runtime *runtime, cfg any,
 		effects:      newDisposableList(),
 		hasEffects:   false,
 		done:         make(chan struct{}),
-		disposedDone: make(chan struct{}),
 		lifecycleCtx: lifecycleCtx,
 		cancel:       cancel,
 	}
@@ -187,15 +184,6 @@ func (f *Fiber) State() FiberState {
 	defer f.mu.Unlock()
 	return f.state
 }
-
-// Disposed returns a channel closed once this fiber reaches StateDisposed.
-//
-// It is a barrier for the terminal state of this fiber, not for every resource
-// in its subtree. An effect body that was still initializing when teardown began
-// may run its disposer after Disposed closes, and a busy child fiber may finish
-// its own cleanup later. Use it to wait for this fiber to reach its terminal
-// state, not as a whole-subtree cleanup barrier.
-func (f *Fiber) Disposed() <-chan struct{} { return f.disposedDone }
 
 // Error returns the error that failed the last load, if any.
 func (f *Fiber) Error() error {
@@ -691,7 +679,6 @@ func (f *Fiber) finalizeDispose() {
 		if parentEffectDisposer != nil {
 			parentEffectDisposer()
 		}
-		close(f.disposedDone)
 	})
 }
 
