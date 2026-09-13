@@ -519,18 +519,13 @@ func (f *Fiber) reload() {
 	bindings, epoch := f.resolveInjections()
 
 	f.mu.Lock()
-	if f.disposed || epoch == f.epoch {
+	if f.disposed || epoch == epochInactive {
 		f.mu.Unlock()
 		return
 	}
 	f.epoch = epoch
 	hasEffects := f.hasEffects
 	f.mu.Unlock()
-
-	if epoch == epochInactive {
-		f.unload()
-		return
-	}
 
 	// reload unloaded above, so this is a defensive re-check before loading a
 	// new generation over live effects.
