@@ -360,34 +360,74 @@ func (f *Fiber) callDisposer(entry *effectEntry, dispose Disposer) {
 // It is re-entrant safe: nested refresh requests set a dirty flag that the
 // outermost call drains, so a plugin that provides a service another plugin
 // waits for cannot recurse without bound.
+// refresh requests one transition pass. If another pass is already running,
+// the request is recorded for that owner instead of starting a second one.
 func (f *Fiber) refresh() {
-	f.mu.Lock()
-	if f.busy {
-		f.dirty = true
-		f.mu.Unlock()
+	if f.beginTransition() {
+		f.drive()
+	}
+}
+
+// drive drains transition passes until no caller asked for another one.
+func (f *Fiber) drive() {
+	for {
+		f.beginPass()
+		f.sync()
+		if f.endPass() {
+			continue
+		}
 		return
 	}
-	f.busy = true
-	f.mu.Unlock()
+}
 
-	for {
-		f.mu.Lock()
-		f.dirty = false
-		f.mu.Unlock()
-
-		f.sync()
-
-		// Re-check under the same lock that clears busy: Dispose sets dirty
-		// under this lock, so either the loop sees it and unwinds, or it sees
-		// busy==false and performs the teardown itself. Both orders are safe.
-		f.mu.Lock()
-		if !f.dirty {
-			f.busy = false
-			f.mu.Unlock()
-			return
-		}
-		f.mu.Unlock()
+// beginTransition tries to become the transition owner. It reports false when
+// another pass is running; that owner is marked for one more pass.
+func (f *Fiber) beginTransition() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.busy {
+		f.dirty = true
+		return false
 	}
+	f.busy = true
+	return true
+}
+
+// beginPass clears the rerun marker for one transition pass.
+func (f *Fiber) beginPass() {
+	f.mu.Lock()
+	f.dirty = false
+	f.mu.Unlock()
+}
+
+// endPass releases ownership unless another pass was requested. It reports
+// whether the owner loop must continue.
+func (f *Fiber) endPass() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.dirty {
+		return true
+	}
+	f.busy = false
+	return false
+}
+
+// claimDispose marks the fiber disposed. It reports whether a transition owner
+// is running and whether another caller already claimed the disposal. The
+// dirty flag is set in the same critical section so a running owner cannot
+// clear busy and exit before seeing the request.
+func (f *Fiber) claimDispose() (busy, already bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.disposed {
+		return false, true
+	}
+	f.disposed = true
+	if f.busy {
+		f.dirty = true
+		return true, false
+	}
+	return false, false
 }
 
 // fiberAction selects one transition in the fiber lifecycle state machine.
@@ -755,19 +795,10 @@ func (f *Fiber) notifyProvided() {
 // is already running, the effect teardown is deferred to that loop. Use Disposed
 // to wait for the deferred teardown.
 func (f *Fiber) Dispose() {
-	f.mu.Lock()
-	if f.disposed {
-		f.mu.Unlock()
+	busy, already := f.claimDispose()
+	if already {
 		return
 	}
-	f.disposed = true
-	busy := f.busy
-	if busy {
-		// Mark dirty in the same critical section that reads busy, so the
-		// refresh loop cannot clear busy and exit before seeing this request.
-		f.dirty = true
-	}
-	f.mu.Unlock()
 
 	// Stop dependent goroutines immediately, then unwind effects.
 	f.cancel()
@@ -779,8 +810,7 @@ func (f *Fiber) Dispose() {
 	}
 
 	if busy {
-		// A transition is in flight. The dirty flag was set atomically above;
-		// the loop in refresh() observes it and unwinds.
+		// claimDispose marked the running transition for another pass.
 		return
 	}
 	if f.root {
