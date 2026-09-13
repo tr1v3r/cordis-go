@@ -359,11 +359,28 @@ func (f *Fiber) callDisposer(entry *effectEntry, dispose Disposer) {
 type fiberAction uint8
 
 const (
+	// actionNoop leaves the fiber unchanged: no terminal request, no forced
+	// reload, and the resolved dependency epoch matches the recorded one.
 	actionNoop fiberAction = iota
+
+	// actionUnload drops an unavailable generation. The resolved epoch is
+	// inactive, so the fiber returns to pending after its effects unwind.
 	actionUnload
+
+	// actionLoad starts a new generation on a clean fiber. The resolved epoch
+	// is satisfiable and differs from the recorded one.
 	actionLoad
+
+	// actionCycle replaces a live generation. The fiber is not clean, so the
+	// previous effects unwind before the new generation loads.
 	actionCycle
+
+	// actionReload forces an unload/reload cycle for Restart and Update,
+	// regardless of whether the dependency epoch changed.
 	actionReload
+
+	// actionDispose drives a terminal disposal: unload effects and finalize
+	// the fiber as disposed.
 	actionDispose
 )
 
