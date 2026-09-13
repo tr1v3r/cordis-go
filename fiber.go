@@ -718,10 +718,17 @@ func (f *Fiber) notifyProvided() {
 	}
 }
 
-// Dispose starts unloading the plugin and releases everything it registered.
-// It is idempotent. Cancellation happens immediately; when a refresh transition
-// is already running, the effect teardown is deferred to that loop. Use Disposed
-// to wait for the deferred teardown.
+// Dispose starts unloading the plugin and releases everything it registered. It
+// is idempotent. Cancellation and the removal of the plugin from the registry
+// happen immediately; the effect teardown runs in this call for the root fiber
+// and whenever the fiber is not part of a running transition, and is otherwise
+// deferred to that transition.
+//
+// There is no "fully disposed" channel to await: for a non-root fiber Dispose
+// returns while the state may still be unloading, or before the deferred
+// teardown has run. The terminal state is observable as
+// State() == StateDisposed, which is the replacement for the removed Disposed
+// method.
 func (f *Fiber) Dispose() {
 	f.mu.Lock()
 	if f.disposed {
