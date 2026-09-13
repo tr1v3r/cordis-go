@@ -77,7 +77,7 @@ type Fiber struct {
 	effects          *disposableList
 	busy             bool
 	dirty            bool
-	reloadRequested  bool
+	forceReload      bool
 	disposed         bool
 	cleaned          bool
 	root             bool
@@ -355,100 +355,6 @@ func (f *Fiber) callDisposer(entry *effectEntry, dispose Disposer) {
 	dispose()
 }
 
-// refresh recomputes the dependency epoch and drives a load/unload transition.
-//
-// It is re-entrant safe: nested refresh requests set a dirty flag that the
-// outermost call drains, so a plugin that provides a service another plugin
-// waits for cannot recurse without bound.
-// refresh requests one transition pass. If another pass is already running,
-// the request is recorded for that owner instead of starting a second one.
-func (f *Fiber) refresh() {
-	if f.beginTransition() {
-		f.drive()
-	}
-}
-
-// drive drains transition passes until no caller asked for another one.
-func (f *Fiber) drive() {
-	for {
-		f.beginPass()
-		f.sync()
-		if f.endPass() {
-			continue
-		}
-		return
-	}
-}
-
-// beginTransition tries to become the transition owner. It reports false when
-// another pass is running; that owner is marked for one more pass.
-func (f *Fiber) beginTransition() bool {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.busy {
-		f.dirty = true
-		return false
-	}
-	f.busy = true
-	return true
-}
-
-// beginPass clears the rerun marker for one transition pass.
-func (f *Fiber) beginPass() {
-	f.mu.Lock()
-	f.dirty = false
-	f.mu.Unlock()
-}
-
-// endPass releases ownership unless another pass was requested. It reports
-// whether the owner loop must continue.
-func (f *Fiber) endPass() bool {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.dirty {
-		return true
-	}
-	f.busy = false
-	return false
-}
-
-// claimDispose marks the fiber disposed. It reports whether a transition owner
-// is running and whether another caller already claimed the disposal. The
-// dirty flag is set in the same critical section so a running owner cannot
-// clear busy and exit before seeing the request.
-func (f *Fiber) claimDispose() (busy, already bool) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.disposed {
-		return false, true
-	}
-	f.disposed = true
-	if f.busy {
-		f.dirty = true
-		return true, false
-	}
-	return false, false
-}
-
-// transitionRequest captures the volatile requests observed at the start of a
-// transition pass.
-type transitionRequest struct {
-	disposed bool
-	reload   bool
-}
-
-// takeRequest consumes pending transition requests under the fiber lock.
-func (f *Fiber) takeRequest() transitionRequest {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	req := transitionRequest{
-		disposed: f.disposed,
-		reload:   f.reloadRequested,
-	}
-	f.reloadRequested = false
-	return req
-}
-
 // fiberAction selects one transition in the fiber lifecycle state machine.
 type fiberAction uint8
 
@@ -475,7 +381,7 @@ func (f *Fiber) sync() {
 }
 
 // plan consumes pending requests and selects the next transition without
-// mutating lifecycle state beyond clearing reloadRequested.
+// mutating lifecycle state beyond clearing forceReload.
 func (f *Fiber) plan() fiberPlan {
 	if f.root || f.runtime == nil {
 		return fiberPlan{action: actionNoop}
@@ -485,7 +391,7 @@ func (f *Fiber) plan() fiberPlan {
 	if req.disposed {
 		return fiberPlan{action: actionDispose}
 	}
-	if req.reload {
+	if req.forceReload {
 		return fiberPlan{action: actionReload}
 	}
 
@@ -848,7 +754,7 @@ func (f *Fiber) Restart() error {
 		return err
 	}
 	f.mu.Lock()
-	f.reloadRequested = true
+	f.forceReload = true
 	f.mu.Unlock()
 	f.refresh()
 	return f.Error()
@@ -864,7 +770,7 @@ func (f *Fiber) Update(config any) error {
 	f.mu.Lock()
 	f.rawConfig = config
 	f.err = nil
-	f.reloadRequested = true
+	f.forceReload = true
 	f.mu.Unlock()
 	f.refresh()
 	return f.Error()

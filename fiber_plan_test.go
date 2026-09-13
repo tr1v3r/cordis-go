@@ -17,13 +17,13 @@ func loadPlanTestFiber(t *testing.T, root *Context, plugin *Plugin[struct{}]) *F
 	return nil
 }
 
-func setPlanTestState(f *Fiber, epoch string, cleaned, disposed, reload bool) {
+func setPlanTestState(f *Fiber, epoch string, cleaned, disposed, forceReload bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.epoch = epoch
 	f.cleaned = cleaned
 	f.disposed = disposed
-	f.reloadRequested = reload
+	f.forceReload = forceReload
 }
 
 func TestPlanSelectsTransition(t *testing.T) {
@@ -86,7 +86,7 @@ func TestPlanSelectsTransition(t *testing.T) {
 	}
 }
 
-func TestPlanConsumesReloadRequest(t *testing.T) {
+func TestPlanConsumesForceReload(t *testing.T) {
 	root := New()
 	fiber := loadPlanTestFiber(t, root, planTestPlugin("consume"))
 	setPlanTestState(fiber, "", true, false, true)
@@ -94,9 +94,9 @@ func TestPlanConsumesReloadRequest(t *testing.T) {
 	fiber.plan()
 
 	fiber.mu.Lock()
-	reload := fiber.reloadRequested
+	force := fiber.forceReload
 	fiber.mu.Unlock()
-	if reload {
-		t.Fatal("reloadRequested was not consumed")
+	if force {
+		t.Fatal("forceReload was not consumed")
 	}
 }
