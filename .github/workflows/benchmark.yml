@@ -1,0 +1,33 @@
+name: benchmark
+
+# Benchmark numbers are only comparable on one machine, so this job does not
+# gate: a GitHub runner's hardware varies between runs, and a threshold applied
+# to that noise fails honest pull requests. What it does instead is run the suite
+# on a schedule (every benchmark body asserts its own result, so a broken
+# benchmark fails here) and keep the output as an artifact, which is what makes a
+# slow trend visible over weeks. The numeric gate is `make benchcheck`, which
+# compares against the committed baseline on the machine that recorded it.
+on:
+  workflow_dispatch:
+  schedule:
+    # Monday 03:00 UTC.
+    - cron: '0 3 * * 1'
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          # Same floor as ci.yml: go.mod requires 1.27 for generic methods.
+          go-version: '1.27.x'
+      - name: Run the benchmark suite
+        run: |
+          set -o pipefail
+          make benchmark | tee benchmark-linux-amd64.txt
+      - name: Keep the numbers
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-linux-amd64
+          path: benchmark-linux-amd64.txt

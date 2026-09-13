@@ -343,11 +343,15 @@ make ci      # CI 跑的东西：gofmt 检查 + go vet + staticcheck + revive + 
 | `make vet` | `go vet ./...` |
 | `make lint` | gofmt 检查 + `go vet` + `staticcheck` + `revive -config .revive.toml` |
 | `make test` | `go test -race ./...` |
+| `make benchsmoke` | 把 88 个 benchmark 各跑一次（`-benchtime=1x`）并带 `-race`；每个用例都自校验结果，所以这是"基准测试本身没坏"的门禁，`make ci` 会跑 |
+| `make benchmark` | 对 Context、服务、事件、Fiber 与 loader 热路径运行 benchmark，并报告内存分配；可用 `BENCHTIME=3s` 延长采样 |
+| `make baseline` | 记录本平台的基线到 `benchmarks/baseline-<goos>-<goarch>.txt`（`CHECKTIME`/`CHECKCOUNT` 控制采样） |
+| `make benchcheck` | 重跑一遍并与基线对比，**时间或分配回归就非零退出**；针对 `cmd/benchcheck` |
 | `make integration` | `go test -race -count=3 ./...`，重复跑以抖出时序问题；`.github/workflows/integration.yml` 执行 |
 | `make fuzz` | 对 loader 配置路径模糊测试 30s（`FuzzCompose`；种子语料随普通 `go test` 回归） |
 | `make examples` | 逐个执行六个示例（`go vet` 只编译它们；能跑起来是另一回事），CI 执行 |
 | `make tools` | 安装固定版本的 staticcheck / revive |
-| `make ci` | `lint` + `test`，`.github/workflows/ci.yml` 执行同一入口 |
+| `make ci` | `lint` + `test` + `benchsmoke`，`.github/workflows/ci.yml` 执行同一入口 |
 
 风格约定由 `.revive.toml` 固化（revive 默认规则集 + **100 列**行宽上限）。
 
@@ -355,6 +359,107 @@ make ci      # CI 跑的东西：gofmt 检查 + go vet + staticcheck + revive + 
 `revive` 读不懂泛型方法，前者报 export data 版本错误，后者把源文件判成语法错误。
 `make tools` 装的就是验证过的版本。另外注意 `staticcheck` 在 `GOCACHE` 不可写时会**静默
 空转**（只打印 `./... matched no packages` 并返回 0）——看到这句就别信它的"通过"。
+
+### 性能基准
+
+`make benchmark` 跑根包的 `benchmark_test.go` 与 `loader/benchmark_test.go`，覆盖两条主链：
+
+- **核心包**：Context 生命周期（`New`/`Dispose`、`WithBaseContext`、`Fork`、`Isolate`）；
+  服务解析（命中、未命中、隔离作用域、五层嵌套 fiber 链、可用性谓词通过/不通过、无类型
+  `Lookup`、`MustGet`、`Set`、`Provide`+回收、`Serve` 的 Start/Stop）；provider 变更时对
+  1/10/100 个依赖者的扇出，以及 0/10/100/1000 个**无关** fiber 下的注册/注销（服务变更要
+  扫全表，这组数就是那条扫描的斜率）；事件（0/1/10/100 监听器、`Scoped` 同作用域与
+  `Global`、`Prepend`、`OnOnce` 完整生命周期、`Bail` 首个/末个命中、`Parallel`、`Waterfall`、
+  注册+注销、panic 隔离，以及 100 个不同事件名下的路由）；插件与 effect 生命周期（加载/卸载、
+  嵌套子插件、`Inject`、`Restart`、`Update`、effect 嵌套、101 个 effect 的 `Effects()` 快照、
+  幂等 Disposer）；logger 的级别过滤、丢弃写入与带参格式化三档路径
+- **loader**：解析（base / patch / 读文件，1/10/100 条；读文件拆成「只读」「只解析」
+  「两者合并」三个用例，好把系统调用与解析开销分开）；组合（单层、补丁、三层叠加、
+  嵌套 group、`insert`、`Strict`）；树查询（`Find` 命中与未命中、`Size`）与
+  `Dump`/`DumpString`；树装载（1/10/100 个插件、分组 fork）；注册表
+  `Register`/`Has`/`Names`
+- **并发**（`b.RunParallel`）：服务查找、事件分发、并发加载同一个 plugin 定义的装载/卸载，
+  以及在同一 fiber 的多个隔离作用域里并发注册服务。这四条测的是争用下的**聚合**吞吐（ns/op
+  是墙钟时间除以总迭代数），和上面单 goroutine 的延迟数字含义不同：读路径在 12 路争用下比
+  单线程慢约 7 倍（`fiber.mu` 在每次查找里都是独占加锁），并发装载则只比串行慢约 2 倍。
+  最后一条正是当初查出并发注册缺陷的用例
+
+⚠️ **相对 #56 之前的实现**（同机背靠背 A/B：两边各 `-benchtime=1s -count=2` 取中位数）
+唯一实质变化是 **`Waterfall`**：1/10/100 监听器的分发由 70/388/3497ns 变为
+155/918/9933ns（+121%/+137%/+184%），分配由 5 变为 7/34/304——这是 #53 把结算改成
+race-free 的代价，也是本仓库目前唯一有明确优化空间的路径。其余用例全部落在 ±11% 内，而本机
+**单轮内**的噪声带就有 12–17%，因此不构成变化；分配普遍 +1（每条 effect、每个被装载的插件
+各一次，`Serve` +5，`ContextNewDispose` 53→54）来自 #52–#56 增加的边界检查与显式归属记账。
+两个并发倍率没有变化：服务查找在 12 路争用下比单线程慢 7.6×→6.9×，并发装载 2.0×→2.0×。
+另：`BenchmarkServiceProvideDisposeParallel` 在 #56 之前的实现上会以 `SERVICE_EXISTS`
+失败——它不是"没有数据"，而是那条路径当时根本不可测。
+
+每个用例都开 `-benchmem`，并在计时循环结束后自校验结果（监听器调用次数、卸载次数、装载
+次数、树节点数、waterfall 终值等），所以一个语义跑偏的基准会**失败**，而不是安静地给出
+好看的数字。`BENCHTIME` 控制单个用例的采样时长（默认 1s）：
+
+```sh
+make benchmark                       # 全矩阵，1s/用例
+BENCHTIME=3s make benchmark          # 更长的采样，降低噪声
+go test -run '^$' -bench 'BenchmarkEventEmit' -benchmem ./...   # 只跑事件分发
+```
+
+数字只在本机同一次运行内可比：不同机器、不同负载、不同 Go 版本之间别横向对比。测的时候别
+并行跑重活（CI、编译），否则采样会被 CPU 争用污染。文件相关的数字（`LoadLayer`）还要额外
+打折：本机文件沙盒下 `os.ReadFile` 一个几 KB 的文件要 ~140µs 量级、连 26 字节的小文件也
+一样贵，说明那是每次 open/read/close 的固定成本，不是库的开销——库自己的解析是 100 条
+≈62µs（80–90MB/s）。
+
+### 性能回归门禁
+
+`make benchcheck` 把一次新采样与提交在仓库里的基线对比，**分配回归一律非零退出**；时间回归
+默认只报告，加 `-gate-time` 才判定：
+
+```sh
+make baseline          # 记录本平台基线（benchmarks/baseline-<goos>-<goarch>.txt）
+make benchcheck        # 重跑一遍并对比；分配回归时 exit 1
+make benchcheck BENCHCHECKFLAGS=-gate-time       # 时间回归也判定（安静机器/专用 runner）
+make benchcheck BENCHCHECKFLAGS=-v               # 打印全部用例，不只变化的
+make benchcheck BENCHCHECKFLAGS=-allow-missing   # 删掉用例时只告警
+```
+
+判定规则（`cmd/benchcheck`，stdlib 实现，不引入外部工具）：
+
+- **分配精确判定，且默认就判定**：任何 allocs/op 增加都算回归，不受容差影响。正常采样时长下
+  重复之间、以及跨运行之间分配数逐位相同（已实测，含并行用例），所以这是**唯一无噪声的信号**，
+  也是这个库最该守住的指标——热路径本来就是零分配
+- **时间默认只报告**（每个变化都打印，并标注 `[not gated: pass -gate-time to fail on time]`）：
+  ⚠️ 本机实测同一份代码、同一台机器，单个用例的**轮内离散度**就有 12–17%（`NestedGroups` 到
+  33%）；更糟的是整机在某个采样窗口里的**持续漂移**——同一份代码连跑三次门禁，其中一次
+  `Compose/Strict` 报 +45.8%（基线三次是 30335/32839/31634），调宽到 50% 后又撞上
+  `PluginInject` +67%。任何能把这类漂移都吸收的阈值都会宽到没有意义，所以时间判定改成显式
+  开启；开启后参照基线里**最慢的一次重复**（而非中位数），叠加 `-tolerance`（默认 50%）与
+  `-floor`（默认 1ns）
+- 每个用例取多次重复（`-count`）的**中位数**时间、**最快/最慢**重复与**最大**分配数；两边
+  的 `-N` 后缀（GOMAXPROCS）会被归一化，所以 `-cpu` 不同也能对齐
+- **环境主导的用例**用 `-ignore=<前缀>` 排除出判定（仍然测量并打印）：Makefile 默认忽略
+  `BenchmarkLoadLayer/ReadFileOnly` 与 `/Combined`，它们测的是本机沙盒文件系统而不是这个库；
+  `/ParseOnly`（内存解析）仍然被判定
+- 只出现在当前采样的用例记为 `new`，不算回归（加覆盖不是退化）；只出现在基线里的用例
+  记为 `missing` 并**失败**——静默丢用例正是性能套件腐烂的方式
+- 基线与采样必须**同一平台**：`goos`/`goarch` 不一致时直接拒绝（`-force` 可强制覆盖），
+  因为跨机器的绝对数字没有意义
+
+门禁本身验证过：连续三次 `make benchcheck` 全绿（分配判定从不误报）；在 `ServiceGet/Hit`
+循环里故意塞一个 `make([]byte, 1)` 后立刻变红（`MORE ALLOCS ...: 0 -> 1`，exit 1）——所以它
+不是空转的绿灯。
+
+⚠️ 因此 `make benchcheck` **不进 `make ci`**：CI runner 的硬件每次都在变，对着噪声判定会
+误伤正常 PR。`make ci` 跑的是 `benchsmoke`（每个 benchmark 各执行一次 + `-race`），保证
+基准测试自己没坏；数字门禁在**录制基线的那台机器上**跑。每周的
+`.github/workflows/benchmark.yml` 会在 CI 上跑一遍全量并把输出作为 artifact 留存，用于看
+趋势——它不判定。
+
+⚠️ 因此 `make benchcheck` **不进 `make ci`**：CI runner 的硬件每次都在变，对着噪声判定会
+误伤正常 PR。`make ci` 跑的是 `benchsmoke`（每个 benchmark 各执行一次 + `-race`），保证
+基准测试自己没坏；数字门禁在**录制基线的那台机器上**跑。每周的
+`.github/workflows/benchmark.yml` 会在 CI 上跑一遍全量并把输出作为 artifact 留存，用于看
+趋势——它不判定。
 
 ## 状态
 
@@ -372,6 +477,19 @@ make ci      # CI 跑的东西：gofmt 检查 + go vet + staticcheck + revive + 
   基线上的量级，会随提交变化（加一个测试就会动），所以这里不写死——要当前值就跑那条命令。
   `examples/` 不在统计里（六个示例由 `make examples` 在 CI 里逐个执行）；`cmd/cordis` 的退出码契约由它自己的进程内测试
   钉住（`--help` / 用法错误 / 加载失败三档）
+- 性能基准 88 个场景（`make benchmark`，见「性能基准」），全部带分配统计与结果自校验；
+  `make ci` 会跑 `benchsmoke` 执行每个用例一次（含 `-race`），数字回归则交给
+  `make benchcheck` 与提交的基线对比（见「性能回归门禁」）。
+  ⚠️ 测 benchmark 时别同时跑别的重活：并发负载会污染采样（本仓库就踩过一次，
+  同一用例在 `make ci` 并行时读到 578µs，独占重测 5 次是 208–301µs）
+- ✅ **并发注册缺陷已修复**（#56，2026-09-14）：同一个 fiber 上由多个 goroutine 并发
+  `Provide` 时，注销曾经可能被推迟进别的 goroutine 的拆解流程——`dispose()` 返回后服务仍
+  处于注册状态，该作用域的下一次 `Provide` 报 `SERVICE_EXISTS`（8 个以上 goroutine 各自
+  isolation scope 循环 `Provide`/`dispose`，约 1.4 万次注册内必现；2/4 个 goroutine 未见）。
+  根因是 effect 归属由 fiber 上单个"当前 body"标记**隐式推断**，并发注册会互相收养；#56 把
+  归属改成由 `Effect` body 收到的 `scope` **显式声明**，fiber 级注册不可能被收养，过期
+  scope 直接拒绝注册（见「Effect」）。回归测试 `effect_scope_provide_test.go` 守这条契约，
+  当初查出该缺陷的 `BenchmarkServiceProvideDisposeParallel` 已恢复并纳入基准矩阵
 - 交叉编译验证：linux/amd64、windows/amd64、darwin/arm64
 - ⚠️ 破坏性变更：`ctx.Effect` 的 body 从 `func() Disposer` 改为
   `func(scope *Context) Disposer`。嵌套副作用必须通过 `scope` 注册；继续使用外层 `ctx` 会明确注册为
@@ -392,6 +510,7 @@ make ci      # CI 跑的东西：gofmt 检查 + go vet + staticcheck + revive + 
 ```
 cordis-go/
 ├── context.go            # Context：查找、隔离、Fork、生命周期
+├── benchmark_test.go     # Context、服务、事件、插件/effect 与 logger 性能基准
 ├── fiber.go              # Fiber：状态机、epoch、加载/卸载
 ├── service.go            # 服务注册、查找、通知依赖者
 ├── registry.go           # 插件定义与 plugin runtime 注册表
@@ -399,11 +518,15 @@ cordis-go/
 ├── logger.go             # 轻量日志服务
 ├── disposable.go         # 幂等 Disposer 与 effect 列表
 ├── funcforms.go          # 包级函数形态：转发到同名 Context 方法
-├── Makefile              # fmt / vet / lint / test / integration / ci 入口
+├── Makefile              # fmt / vet / lint / test / benchsmoke / benchmark / baseline / benchcheck / ci 入口
 ├── .revive.toml          # 风格规则：revive 默认集 + 100 列行宽
-├── .github/workflows/    # CI：Go 1.27，ci.yml 跑 make ci，integration.yml 跑 make integration
-├── loader/               # 配置驱动装配、patch 层、config dump
-├── cmd/cordis/           # 配置 dump 命令行工具
+├── .github/workflows/    # CI：Go 1.27，ci.yml 跑 make ci，integration.yml 跑 make integration，
+│                         # benchmark.yml 每周留存性能数字（只测不判定）
+├── loader/               # 配置驱动装配、patch 层、config dump 及性能基准
+├── benchmarks/           # 各平台的性能基线（baseline-<goos>-<goarch>.txt），供 make benchcheck 对比
+├── cmd/
+│   ├── cordis/           # 配置 dump 命令行工具
+│   └── benchcheck/       # 基线对比门禁：时间回归（容差 + 绝对下限）与分配回归
 └── examples/
     ├── basic             # 端到端示例
     ├── events            # 五种事件分发模式及 Scoped 变体
