@@ -45,6 +45,8 @@ fiber, err := rootCtx.Load(plugin, dbConfig{Path: "app.db"})
 | `@cordisjs/plugin-loader` + `cordis.yml` | `loader` 子包 + JSON 配置 | 配置驱动装配、patch 层、config dump |
 | `Promise` / `await` | 同步调用 + `ctx.Context()` | 取消传播用 `context.Context` |
 
+代码级生命周期、依赖、事件和装配流程见 [`docs/`](docs/README.md)。
+
 ## 五个概念
 
 ### 1. Context — 依赖容器与生命周期作用域
