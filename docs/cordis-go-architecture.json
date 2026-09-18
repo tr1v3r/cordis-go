@@ -1,0 +1,366 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "cordis-go 核心架构",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "viewBox": [
+      1100,
+      450
+    ],
+    "repository": {
+      "url": "https://github.com/tr1v3r/cordis-go",
+      "provider": "github",
+      "link_mode": "web",
+      "revision": "2c249376c9b73cec42ad6adc8370f8d27b9cf642"
+    }
+  },
+  "components": [
+    {
+      "id": "host-app",
+      "type": "external",
+      "label": "宿主应用",
+      "sublabel": "cmd/cordis · 用户 main",
+      "pos": [
+        40,
+        205
+      ],
+      "size": [
+        130,
+        60
+      ]
+    },
+    {
+      "id": "event-bus",
+      "type": "messagebus",
+      "label": "事件总线",
+      "sublabel": "On · Emit · Bail · Waterfall",
+      "pos": [
+        280,
+        60
+      ],
+      "size": [
+        130,
+        60
+      ],
+      "sources": [
+        {
+          "path": "events.go",
+          "line": 71,
+          "label": "Context.On[E]"
+        }
+      ]
+    },
+    {
+      "id": "plugin-defs",
+      "type": "backend",
+      "label": "插件定义",
+      "sublabel": "Define[C] · Inject(deps)",
+      "pos": [
+        510,
+        60
+      ],
+      "size": [
+        130,
+        60
+      ],
+      "sources": [
+        {
+          "path": "registry.go",
+          "line": 231,
+          "label": "Inject · Define"
+        }
+      ]
+    },
+    {
+      "id": "service-bindings",
+      "type": "database",
+      "label": "服务绑定",
+      "sublabel": "name + isolate 作用域",
+      "pos": [
+        740,
+        60
+      ],
+      "size": [
+        130,
+        60
+      ],
+      "sources": [
+        {
+          "path": "service.go",
+          "line": 45,
+          "label": "provide · lookup"
+        }
+      ]
+    },
+    {
+      "id": "context-core",
+      "type": "backend",
+      "label": "Context",
+      "sublabel": "依赖容器 · 生命周期作用域",
+      "pos": [
+        280,
+        205
+      ],
+      "size": [
+        130,
+        60
+      ],
+      "sources": [
+        {
+          "path": "context.go",
+          "line": 63,
+          "label": "New · Fork · Effect"
+        }
+      ]
+    },
+    {
+      "id": "fiber-runtime",
+      "type": "backend",
+      "label": "Fiber 运行时",
+      "sublabel": "pending → active → disposed",
+      "pos": [
+        510,
+        205
+      ],
+      "size": [
+        130,
+        60
+      ],
+      "sources": [
+        {
+          "path": "fiber.go",
+          "label": "状态机"
+        }
+      ]
+    },
+    {
+      "id": "effect-scopes",
+      "type": "backend",
+      "label": "Effect 作用域",
+      "sublabel": "Disposer · LIFO 回收",
+      "pos": [
+        740,
+        205
+      ],
+      "size": [
+        130,
+        60
+      ],
+      "sources": [
+        {
+          "path": "disposable.go",
+          "line": 30,
+          "label": "EffectMeta"
+        }
+      ]
+    },
+    {
+      "id": "plugin-bodies",
+      "type": "external",
+      "label": "插件体",
+      "sublabel": "用户 Plugin[C] 函数",
+      "pos": [
+        940,
+        205
+      ],
+      "size": [
+        130,
+        60
+      ]
+    },
+    {
+      "id": "config-layers",
+      "type": "external",
+      "label": "JSON 配置层",
+      "sublabel": "base + patch 条目",
+      "pos": [
+        40,
+        350
+      ],
+      "size": [
+        130,
+        60
+      ]
+    },
+    {
+      "id": "layer-compose",
+      "type": "backend",
+      "label": "层合成器",
+      "sublabel": "ParseLayer · Compose",
+      "pos": [
+        280,
+        350
+      ],
+      "size": [
+        130,
+        60
+      ],
+      "sources": [
+        {
+          "path": "loader/loader.go",
+          "line": 174,
+          "label": "Compose"
+        }
+      ]
+    },
+    {
+      "id": "loader-registry",
+      "type": "backend",
+      "label": "运行期注册表",
+      "sublabel": "Register[C] 闭包",
+      "pos": [
+        500,
+        350
+      ],
+      "size": [
+        130,
+        60
+      ],
+      "sources": [
+        {
+          "path": "loader/loader.go",
+          "line": 614,
+          "label": "Register[C]"
+        }
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "package cordis · 核心运行时",
+      "wraps": [
+        "event-bus",
+        "plugin-defs",
+        "service-bindings",
+        "context-core",
+        "fiber-runtime",
+        "effect-scopes"
+      ]
+    },
+    {
+      "kind": "region",
+      "label": "loader 子包 · 配置驱动装配",
+      "wraps": [
+        "layer-compose",
+        "loader-registry"
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "id": "c-load",
+      "from": "host-app",
+      "to": "context-core",
+      "label": "ctx.Load(p, cfg)",
+      "variant": "emphasis"
+    },
+    {
+      "id": "c-fiber",
+      "from": "context-core",
+      "to": "fiber-runtime",
+      "label": "派生 fiber 实例"
+    },
+    {
+      "id": "c-dispose",
+      "from": "fiber-runtime",
+      "to": "effect-scopes",
+      "label": "登记 Disposer"
+    },
+    {
+      "id": "c-body",
+      "from": "fiber-runtime",
+      "to": "plugin-bodies",
+      "label": "执行插件体",
+      "fromSide": "bottom",
+      "toSide": "bottom"
+    },
+    {
+      "id": "c-provide",
+      "from": "plugin-bodies",
+      "to": "service-bindings",
+      "label": "Provide · Serve",
+      "fromSide": "top",
+      "toSide": "right"
+    },
+    {
+      "id": "c-reload",
+      "from": "service-bindings",
+      "to": "fiber-runtime",
+      "label": "依赖变更 → 自动重载",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "c-events",
+      "from": "context-core",
+      "to": "event-bus",
+      "label": "On · Emit · Bail",
+      "fromSide": "top",
+      "toSide": "bottom",
+      "labelAt": [
+        338,
+        140
+      ]
+    },
+    {
+      "id": "c-inject",
+      "from": "plugin-defs",
+      "to": "context-core",
+      "label": "Inject 挂起待依赖",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "c-files",
+      "from": "config-layers",
+      "to": "layer-compose",
+      "label": "层文件"
+    },
+    {
+      "id": "c-tree",
+      "from": "layer-compose",
+      "to": "loader-registry",
+      "label": "Node 树"
+    },
+    {
+      "id": "c-typed-load",
+      "from": "loader-registry",
+      "to": "context-core",
+      "label": "逐条类型化 Load",
+      "fromSide": "top",
+      "toSide": "bottom"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "两种装配入口",
+      "items": [
+        "代码优先：cordis.New() + ctx.Load(p, cfg)",
+        "配置优先：loader 合成 base/patch JSON 层，Register[C] 闭包逐条加载"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "核心运行时语义",
+      "items": [
+        "Fiber 状态机：pending → active → disposed，failed 非终态可重试",
+        "依赖提供者变更时自动 unload → reload",
+        "同一 definition 加载两次 = 一个 runtime、两个 fiber"
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "Go 侧 API 形态",
+      "items": [
+        "泛型入口成对：Context 方法 + 包级孪生（funcforms.go）；Inject 仅包级",
+        "擦除边界：definition 非导出，注册期闭包固定 C",
+        "运行期无类型访问走 ctx.Lookup / ctx.Set"
+      ]
+    }
+  ]
+}

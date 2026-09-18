@@ -110,7 +110,9 @@ func (p *Plugin[C]) Run(ctx *Context, config any) error {
 	return p.Apply(ctx, value)
 }
 
-// Load starts a typed plugin in this context and returns its fiber.
+// Load starts a typed plugin in this context and returns its fiber. A context
+// passed to an Effect body makes the child fiber part of that effect; the
+// plugin's own context starts a fresh fiber-level effect scope.
 //
 // Loading is synchronous, so when Load returns the fiber has already settled
 // into active, pending (dependencies unmet) or failed. A failed plugin body is
@@ -123,7 +125,8 @@ func (c *Context) Load[C any](plugin *Plugin[C], config C) (*Fiber, error) {
 }
 
 // LoadWithInject starts a typed plugin with extra required services on top of
-// the ones the plugin declares itself. Loaders use it for config-driven inject.
+// the ones the plugin declares itself. It follows Load's explicit effect
+// ownership. Loaders use it for config-driven inject.
 func (c *Context) LoadWithInject[C any](plugin *Plugin[C], config C,
 	extra ...string) (*Fiber, error) {
 	return load(c, plugin, config, extra)
@@ -131,6 +134,14 @@ func (c *Context) LoadWithInject[C any](plugin *Plugin[C], config C,
 
 func load(parentCtx *Context, definition definition, config any, extra []string) (*Fiber, error) {
 	if definition == nil {
+		return nil, newError(ErrInvalidPlugin, "nil plugin definition")
+	}
+	kind := reflect.TypeOf(definition)
+	if kind == nil || kind.Kind() != reflect.Pointer || !kind.Comparable() {
+		return nil, newError(ErrInvalidPlugin,
+			"plugin definition must be a comparable pointer, got %T", definition)
+	}
+	if reflect.ValueOf(definition).IsNil() {
 		return nil, newError(ErrInvalidPlugin, "nil plugin definition")
 	}
 	if err := parentCtx.fiber.assertActive(); err != nil {
@@ -215,11 +226,12 @@ func (d *injectDefinition) ResolveConfig(any) (any, error) { return nil, nil }
 func (d *injectDefinition) Run(ctx *Context, _ any) error  { return d.body(ctx) }
 
 // Inject runs body once every service in deps is available, reloading it
-// whenever a provider changes. It is the Go form of ctx.inject().
+// whenever a provider changes. Its fiber follows parentCtx's explicit effect
+// ownership. It is the Go form of ctx.inject().
 func Inject(parentCtx *Context, deps []string, body func(*Context) error) (*Fiber, error) {
-	name := "inject"
-	if body != nil {
-		name = fmt.Sprintf("inject#%p", body)
+	if body == nil {
+		return nil, newError(ErrInvalidPlugin, "inject body must not be nil")
 	}
+	name := fmt.Sprintf("inject#%p", body)
 	return load(parentCtx, &injectDefinition{name: name, deps: deps, body: body}, nil, nil)
 }

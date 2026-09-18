@@ -382,3 +382,38 @@ func TestIntegrationMidTreeFailureRollsBackAcrossGroup(t *testing.T) {
 		t.Fatalf("want no plugin with live fibers after rollback, got %v", got)
 	}
 }
+
+func TestIntegrationTreeLoadFollowsExplicitEffectScopeAcrossGroup(t *testing.T) {
+	rec := &loadRecorder{}
+	tree := &loader.Tree{Nodes: []*loader.Node{{
+		ID:    "group",
+		Group: true,
+		Children: []*loader.Node{{
+			ID: "worker", Name: "tagged", Config: map[string]any{"tag": "scoped"},
+		}},
+	}}}
+	root := cordis.New()
+	defer root.Fiber().Dispose()
+
+	var fibers []*cordis.Fiber
+	var loadErr error
+	outer := root.Effect("outer", func(scope *cordis.Context) cordis.Disposer {
+		fibers, loadErr = tree.Load(scope, newIntegrationRegistry(rec))
+		return nil
+	})
+	if loadErr != nil {
+		t.Fatal(loadErr)
+	}
+	if len(fibers) != 1 || fibers[0].State() != cordis.StateActive {
+		t.Fatalf("want one active scoped fiber, got %+v", fibers)
+	}
+
+	outer()
+	if got := fibers[0].State(); got != cordis.StateDisposed {
+		t.Fatalf("want tree-loaded fiber disposed with outer, got %s", got)
+	}
+	wantEvents := []string{"load:scoped", "dispose:scoped"}
+	if !reflect.DeepEqual(rec.events, wantEvents) {
+		t.Fatalf("want scoped loader lifecycle %v, got %v", wantEvents, rec.events)
+	}
+}

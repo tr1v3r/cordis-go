@@ -21,9 +21,9 @@ func TestPanicInEffectBodyUnwindsNestedEffects(t *testing.T) {
 	)
 	panicked := func() (panicked bool) {
 		defer func() { panicked = recover() != nil }()
-		root.Effect("outer", func() cordis.Disposer {
-			root.On("ev", func(struct{}) { hits.Add(1) })
-			root.OnDispose(func() { unwound.Add(1) })
+		root.Effect("outer", func(scope *cordis.Context) cordis.Disposer {
+			scope.On("ev", func(struct{}) { hits.Add(1) })
+			scope.OnDispose(func() { unwound.Add(1) })
 			panic("boom")
 		})
 		return false
@@ -56,10 +56,10 @@ func TestNestedEffectPanicUnwindsWholeCascade(t *testing.T) {
 	var order []string
 	panicked := func() (panicked bool) {
 		defer func() { panicked = recover() != nil }()
-		root.Effect("outer", func() cordis.Disposer {
-			root.OnDispose(func() { order = append(order, "outer-sibling") })
-			root.Effect("inner", func() cordis.Disposer {
-				root.OnDispose(func() { order = append(order, "inner-child") })
+		root.Effect("outer", func(outer *cordis.Context) cordis.Disposer {
+			outer.OnDispose(func() { order = append(order, "outer-sibling") })
+			outer.Effect("inner", func(inner *cordis.Context) cordis.Disposer {
+				inner.OnDispose(func() { order = append(order, "inner-child") })
 				panic("boom")
 			})
 			return func() {}
@@ -81,7 +81,7 @@ func TestNestedEffectPanicUnwindsWholeCascade(t *testing.T) {
 	// An effect registered after the cascade must be reachable: disposal still
 	// unwinds it exactly once.
 	unwound := 0
-	root.Effect("after", func() cordis.Disposer {
+	root.Effect("after", func(*cordis.Context) cordis.Disposer {
 		return func() { unwound++ }
 	})
 	root.Fiber().Dispose()
@@ -100,8 +100,8 @@ func TestServiceProvidedInPanickingBodyReleasesName(t *testing.T) {
 	var provideErr error
 	panicked := func() (panicked bool) {
 		defer func() { panicked = recover() != nil }()
-		root.Effect("outer", func() cordis.Disposer {
-			_, provideErr = cordis.Provide[*fakeDB](root, "db", &fakeDB{name: "temp"})
+		root.Effect("outer", func(scope *cordis.Context) cordis.Disposer {
+			_, provideErr = cordis.Provide[*fakeDB](scope, "db", &fakeDB{name: "temp"})
 			panic("boom")
 		})
 		return false
@@ -121,11 +121,10 @@ func TestServiceProvidedInPanickingBodyReleasesName(t *testing.T) {
 	root.Fiber().Dispose()
 }
 
-// TestConcurrentEffectRegistrationKeepsEffectsReachable pins the effect-tree
-// invariant under concurrent registration: an effect registered after two
-// overlapping bodies must still be unwound by the fiber's disposal, even though
-// one of those bodies restored the enclosing scope while the other still ran.
-func TestConcurrentEffectRegistrationKeepsEffectsReachable(t *testing.T) {
+// TestConcurrentEffectRegistrationsStayAtFiberLevel pins explicit ownership:
+// overlapping bodies started through the same plugin context are siblings, so
+// disposing one cannot unwind the other.
+func TestConcurrentEffectRegistrationsStayAtFiberLevel(t *testing.T) {
 	root := cordis.New()
 
 	firstEntered := make(chan struct{})
@@ -136,42 +135,47 @@ func TestConcurrentEffectRegistrationKeepsEffectsReachable(t *testing.T) {
 	secondExited := make(chan struct{})
 
 	var (
-		firstDisposer cordis.Disposer
-		thirdUnwound  atomic.Int32
+		firstDisposer    cordis.Disposer
+		secondUnwound    atomic.Int32
+		thirdUnwound     atomic.Int32
+		siblings         bool
+		secondAfterFirst int32
 	)
 
 	plugin := cordis.Define[struct{}]("racy", func(ctx *cordis.Context, _ struct{}) error {
-		// The first body blocks, so the fiber's current effect is E1.
 		go func() {
-			firstDisposer = ctx.Effect("first", func() cordis.Disposer {
+			firstDisposer = ctx.Effect("first", func(*cordis.Context) cordis.Disposer {
 				close(firstEntered)
 				<-releaseFirst
-				return func() {}
+				return nil
 			})
 			close(firstDisposerReady)
 		}()
 		<-firstEntered
 
-		// A second body starts while E1 is open, then blocks inside it.
 		go func() {
-			ctx.Effect("second", func() cordis.Disposer {
+			ctx.Effect("second", func(*cordis.Context) cordis.Disposer {
 				close(secondEntered)
 				<-releaseSecond
-				return func() {}
+				return func() { secondUnwound.Add(1) }
 			})
 			close(secondExited)
 		}()
 		<-secondEntered
 
-		// The first body returns and its effect is disposed while the second
-		// body still runs: the second body must not restore the dead E1.
+		effects := ctx.Effects()
+		siblings = len(effects) == 2 && effects[0].Label == "first" &&
+			effects[1].Label == "second" && len(effects[0].Children()) == 0 &&
+			len(effects[1].Children()) == 0
+
 		close(releaseFirst)
 		<-firstDisposerReady
 		firstDisposer()
+		secondAfterFirst = secondUnwound.Load()
 		close(releaseSecond)
 		<-secondExited
 
-		ctx.Effect("third", func() cordis.Disposer {
+		ctx.Effect("third", func(*cordis.Context) cordis.Disposer {
 			return func() { thirdUnwound.Add(1) }
 		})
 		return nil
@@ -181,10 +185,18 @@ func TestConcurrentEffectRegistrationKeepsEffectsReachable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if !siblings {
+		t.Fatalf("want overlapping effects as siblings, got %+v", fiber.Effects())
+	}
+	if secondAfterFirst != 0 {
+		t.Fatalf("want second alive after disposing first, got %d unwinds", secondAfterFirst)
+	}
 	fiber.Dispose()
+	if got := secondUnwound.Load(); got != 1 {
+		t.Fatalf("want the second effect unwound once by fiber disposal, got %d", got)
+	}
 	if got := thirdUnwound.Load(); got != 1 {
-		t.Fatalf("want the third effect unwound once by disposal, got %d (effects = %d)",
-			got, len(fiber.Effects()))
+		t.Fatalf("want the third effect unwound once by fiber disposal, got %d", got)
 	}
 	if got := len(fiber.Effects()); got != 0 {
 		t.Fatalf("want no live effects, got %d", got)

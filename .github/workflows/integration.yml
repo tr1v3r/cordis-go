@@ -17,3 +17,5 @@ jobs:
           go-version: '1.27.x'
       - name: Run the integration suite
         run: make integration
+      - name: Fuzz the loader configuration path
+        run: make fuzz

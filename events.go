@@ -66,7 +66,8 @@ func WithOnce() EventOption {
 	return func(o *eventOptions) { o.once = true }
 }
 
-// On registers a typed listener owned by the context's fiber.
+// On registers a typed listener owned by the context's explicit effect scope,
+// or by its fiber when no such scope is present.
 func (c *Context) On[E any](name string, fn func(E), opts ...EventOption) Disposer {
 	return c.on(name, func(payload any, _ func(any) any) any {
 		fn(assertPayload[E](name, payload))
@@ -127,7 +128,7 @@ func (c *Context) on(name string, fn func(any, func(any) any) any, opts ...Event
 		once:    options.once,
 	}
 	bus := c.shared.bus
-	disposer := c.fiber.effect(fmt.Sprintf("ctx.On(%q)", name), func() Disposer {
+	disposer := c.effect(fmt.Sprintf("ctx.On(%q)", name), func(*effectEntry) Disposer {
 		bus.add(listener)
 		return func() { bus.remove(listener) }
 	})
@@ -226,7 +227,7 @@ func (b *eventBus) invoke(listener *eventListener, payload any) (result any, err
 		}
 		if reason := recover(); reason != nil {
 			err = fmt.Errorf("event %q listener panicked: %v", listener.name, reason)
-			b.shared.log.errorf("cordis: %v", err)
+			b.shared.log.errorf("%v", err)
 		}
 	}()
 	return listener.fn(payload, nil), nil
@@ -349,49 +350,111 @@ func (c *Context) WaterfallScoped[E any](scopeName, name string, payload E, fina
 func waterfallWith[E any](c *Context, name string, payload E, final func(E) any,
 	filter func(*eventListener) bool) any {
 	listeners := c.shared.bus.selectListeners(name, filter)
-	index := 0
-	// settled and settledResult latch the chain's single settlement. Cordis
-	// settles a waterfall once, but two things here can reach the final call
-	// twice: a listener that panics after next returned unwinds back into this
-	// loop, and a listener that calls next again re-enters the tail. The latch
-	// is taken before final runs, so a panicking final cannot run twice either.
-	settled := false
-	var settledResult any
-	var next func(any) any
-	next = func(value any) any {
-		for index < len(listeners) {
-			listener := listeners[index]
-			index++
-			if !claim(listener) {
-				continue
-			}
-			once := listener.once
-			result, err := func() (result any, err error) {
-				defer func() {
-					if once {
-						c.shared.bus.releaseOnce(listener)
-					}
-					if reason := recover(); reason != nil {
-						err = fmt.Errorf("event %q listener panicked: %v", listener.name, reason)
-					}
-				}()
-				return listener.fn(value, next), nil
-			}()
-			if err != nil {
-				c.shared.log.errorf("cordis: %v", err)
-				continue
-			}
-			return result
-		}
-		if settled {
-			return settledResult
-		}
-		settled = true
-		if final == nil {
-			return nil
-		}
-		settledResult = final(assertPayload[E](name, value))
-		return settledResult
+	tail := &waterfallStep{name: name, bus: c.shared.bus}
+	if final != nil {
+		tail.final = func(value any) any { return final(assertPayload[E](name, value)) }
 	}
-	return next(payload)
+	for i := len(listeners) - 1; i >= 0; i-- {
+		tail = &waterfallStep{
+			name:     name,
+			bus:      c.shared.bus,
+			listener: listeners[i],
+			next:     tail,
+		}
+	}
+	return tail.call(payload)
+}
+
+// waterfallStep owns one continuation in a waterfall chain. Each listener gets
+// the call method of its successor as next, so synchronous recursive next calls
+// enter a different step and never wait on themselves. Calls to the same next
+// while that step is running wait for its first caller: this makes concurrent or
+// saved next calls deterministic, and no listener or final can run twice.
+type waterfallStep struct {
+	name     string
+	bus      *eventBus
+	listener *eventListener
+	final    func(any) any
+	next     *waterfallStep
+
+	mu       sync.Mutex
+	started  bool
+	finished bool
+	done     chan struct{}
+	result   any
+}
+
+func (s *waterfallStep) call(value any) any {
+	s.mu.Lock()
+	if s.finished {
+		result := s.result
+		s.mu.Unlock()
+		return result
+	}
+	if s.started {
+		done := s.done
+		s.mu.Unlock()
+		<-done
+		s.mu.Lock()
+		result := s.result
+		s.mu.Unlock()
+		return result
+	}
+	s.started = true
+	s.done = make(chan struct{})
+	s.mu.Unlock()
+
+	result := s.run(value)
+
+	s.mu.Lock()
+	s.result = result
+	s.finished = true
+	close(s.done)
+	s.mu.Unlock()
+	return result
+}
+
+func (s *waterfallStep) run(value any) any {
+	if s.listener == nil {
+		return s.runFinal(value)
+	}
+	result, invoked, err := s.invokeListener(value)
+	if !invoked {
+		return s.next.call(value)
+	}
+	if err != nil {
+		s.bus.shared.log.errorf("%v", err)
+		return s.next.call(value)
+	}
+	return result
+}
+
+func (s *waterfallStep) invokeListener(value any) (result any, invoked bool, err error) {
+	if !claim(s.listener) {
+		return nil, false, nil
+	}
+	invoked = true
+	defer func() {
+		if s.listener.once {
+			s.bus.releaseOnce(s.listener)
+		}
+		if reason := recover(); reason != nil {
+			err = fmt.Errorf("event %q listener panicked: %v", s.name, reason)
+		}
+	}()
+	result = s.listener.fn(value, s.next.call)
+	return result, invoked, nil
+}
+
+func (s *waterfallStep) runFinal(value any) (result any) {
+	if s.final == nil {
+		return nil
+	}
+	defer func() {
+		if reason := recover(); reason != nil {
+			result = nil
+			s.bus.shared.log.errorf("event %q final panicked: %v", s.name, reason)
+		}
+	}()
+	return s.final(value)
 }

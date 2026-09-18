@@ -26,7 +26,9 @@
 // service is provided by an active fiber, the plugin stays PENDING; when a
 // dependency appears, changes provider, or disappears, the plugin is
 // automatically unloaded and reloaded. Every side effect registered through the
-// context (services, event listeners, arbitrary disposers) is unwound in
-// reverse order when the plugin unloads, which is what makes plugins
-// reversible.
+// plugin context (services, event listeners, arbitrary disposers) is unwound in
+// reverse order when the plugin unloads. Effect passes its body a derived
+// Context: registrations through that explicit scope unwind with the effect,
+// while registrations through the original Context remain fiber-owned. This
+// explicit ownership keeps concurrent goroutines independent.
 package cordis
