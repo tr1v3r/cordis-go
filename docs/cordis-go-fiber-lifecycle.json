@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "diagram_type": "lifecycle",
+  "meta": {
+    "title": "cordis-go Fiber 生命周期",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "viewBox": [1080, 566]
+  },
+  "lanes": [
+    { "id": "main", "label": "加载主轨" },
+    { "id": "retry", "label": "失败与重试" }
+  ],
+  "states": [
+    { "id": "fiber-pending", "type": "start", "label": "Pending", "sublabel": "等待必需服务", "lane": "main", "col": 0, "step": "01", "width": 124 },
+    { "id": "fiber-loading", "type": "active", "label": "Loading", "sublabel": "运行插件体", "lane": "main", "col": 1, "step": "02", "width": 124 },
+    { "id": "fiber-active", "type": "success", "label": "Active", "sublabel": "服务对外可见", "lane": "main", "col": 2, "step": "03", "width": 124 },
+    { "id": "fiber-unloading", "type": "neutral", "label": "Unloading", "sublabel": "LIFO 回收 effect", "lane": "main", "col": 3, "step": "04", "width": 124 },
+    { "id": "fiber-disposed", "type": "neutral", "label": "Disposed", "sublabel": "终态 · 不再重启", "lane": "main", "col": 4, "step": "05", "tag": "terminal", "width": 124 },
+    { "id": "fiber-failed", "type": "failure", "label": "Failed", "sublabel": "错误保留至下轮加载", "lane": "retry", "col": 0, "tag": "可恢复" }
+  ],
+  "transitions": [
+    { "id": "t-load-fail", "from": "fiber-loading", "to": "fiber-failed", "label": "插件体出错 / panic", "fromSide": "bottom", "toSide": "top" },
+    { "id": "t-fail-retry", "from": "fiber-failed", "to": "fiber-loading", "label": "Update(cfg) · 依赖就绪", "variant": "emphasis", "fromSide": "left", "toSide": "bottom", "labelAt": [160, 235] },
+    { "id": "t-unload-return", "from": "fiber-unloading", "to": "fiber-pending", "label": "回收完毕 · 待下一轮", "variant": "dashed", "route": "top-channel" }
+  ],
+  "cards": []
+}

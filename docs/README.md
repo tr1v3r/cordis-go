@@ -7,6 +7,10 @@ cordis-go-architecture.html
   └─ 组件地图：Context/Fiber/Effect/服务/事件 + loader 装配
      （可编辑源：cordis-go-architecture.json，改后需重新生成 HTML）
 
+cordis-go-fiber-lifecycle.html
+  └─ Fiber 状态机：pending → active → disposed + 失败重试与重载回环
+     （可编辑源：cordis-go-fiber-lifecycle.json，状态定义见 fiber.go L22-27）
+
 
 【生命周期与依赖】
 
