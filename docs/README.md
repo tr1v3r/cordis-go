@@ -1,6 +1,13 @@
 # 核心工作流索引
 
 ```text
+【架构总览】
+
+cordis-go-architecture.html
+  └─ 组件地图：Context/Fiber/Effect/服务/事件 + loader 装配
+     （可编辑源：cordis-go-architecture.json，改后需重新生成 HTML）
+
+
 【生命周期与依赖】
 
 fiber-dependency-flow.md

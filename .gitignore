@@ -10,3 +10,6 @@ __debug_bin*
 .idea/
 .vscode/
 .DS_Store
+
+# Diagram delivery evidence (regenerated on every archify deliver)
+docs/*.visual-check.*

@@ -1,0 +1,3 @@
+# Generated architecture artifact: tracked for offline viewing, but its
+# full-file rewrites must not flood text diffs and code review.
+docs/cordis-go-architecture.html -diff
