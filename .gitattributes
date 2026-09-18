@@ -2,3 +2,4 @@
 # full-file rewrites must not flood text diffs and code review.
 docs/cordis-go-architecture.html -diff
 docs/cordis-go-fiber-lifecycle.html -diff
+docs/cordis-go-dependency-propagation.html -diff

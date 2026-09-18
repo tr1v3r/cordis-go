@@ -11,6 +11,10 @@ cordis-go-fiber-lifecycle.html
   └─ Fiber 状态机：pending → active → disposed + 失败重试与重载回环
      （可编辑源：cordis-go-fiber-lifecycle.json，状态定义见 fiber.go L22-27）
 
+cordis-go-dependency-propagation.html
+  └─ 依赖传播时序：Provide → notify → Inject 就绪 / Dispose → LIFO 级联回收
+     （可编辑源：cordis-go-dependency-propagation.json，机制见 service.go notify/unregister）
+
 
 【生命周期与依赖】
 

@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "diagram_type": "sequence",
+  "meta": {
+    "title": "cordis-go 依赖注册与回收传播",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "column_fit": "spread",
+    "viewBox": [1085, 580]
+  },
+  "participants": [
+    { "id": "host", "type": "external", "label": "宿主", "sublabel": "Load / Dispose" },
+    { "id": "prov", "type": "backend", "label": "提供方 Fiber", "sublabel": "db 插件体" },
+    { "id": "svc", "type": "database", "label": "服务绑定", "sublabel": "name + isolate 作用域" },
+    { "id": "dep", "type": "backend", "label": "依赖方 Fiber", "sublabel": "Inject(deps)" }
+  ],
+  "segments": [
+    { "from": 148, "to": 375, "label": "注册传播 · 依赖就绪" },
+    { "from": 392, "to": 520, "label": "回收传播 · LIFO 级联" }
+  ],
+  "messages": [
+    { "id": "m-load", "from": "host", "to": "prov", "y": 160, "label": "Load(db, cfg)", "variant": "emphasis" },
+    { "id": "m-provide", "from": "prov", "to": "svc", "y": 197, "label": "Provide(\"db\", handle)", "variant": "emphasis", "note": "Disposer 归 fiber 所有" },
+    { "id": "m-notify", "from": "svc", "to": "dep", "y": 234, "label": "notify(name, scope)", "variant": "dashed" },
+    { "id": "m-get", "from": "dep", "to": "svc", "y": 271, "label": "Get[*DB](\"db\") → live" },
+    { "id": "m-cascade", "from": "dep", "to": "svc", "y": 308, "label": "Provide(\"cache\", …)", "variant": "emphasis", "note": "依赖方亦可提供 → notify 向下游级联" },
+    { "id": "m-dispose", "from": "host", "to": "prov", "y": 405, "label": "Dispose() / 依赖变更" },
+    { "id": "m-unreg", "from": "prov", "to": "svc", "y": 442, "label": "unregister(\"db\")", "note": "Disposer LIFO 逆序 · ctx.Context() 取消" },
+    { "id": "m-notify2", "from": "svc", "to": "dep", "y": 479, "label": "notify(失活)", "variant": "dashed", "note": "依赖方卸载 → unregister(\"cache\") → 级联继续" }
+  ],
+  "activations": [
+    { "participant": "prov", "from": 148, "to": 456 },
+    { "participant": "svc", "from": 190, "to": 495 },
+    { "participant": "dep", "from": 226, "to": 495 }
+  ]
+}
