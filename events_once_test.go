@@ -309,3 +309,34 @@ func TestPlainListenerIsNotReleasedByDispatch(t *testing.T) {
 		t.Fatalf("want %d effects after disposal, got %d", base, got)
 	}
 }
+
+func TestNilInterfacePayloadDispatch(t *testing.T) {
+	root := cordis.New()
+	defer root.Fiber().Dispose()
+	calls := 0
+	root.OnOnce("result", func(err error) {
+		if err != nil {
+			t.Errorf("want nil error, got %v", err)
+		}
+		calls++
+	})
+	for range 2 {
+		if err := root.Parallel[error]("result", nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if calls != 1 {
+		t.Fatalf("want 1 call, got %d", calls)
+	}
+	root.On("mismatch", func(int) { t.Error("want int listener skipped, got call") })
+	if err := root.Parallel[error]("mismatch", nil); err == nil {
+		t.Fatal("want type mismatch, got nil")
+	}
+	root.OnWaterfall("chain", func(value error, next func(error) any) any {
+		return next(value)
+	})
+	got := root.Waterfall[error]("chain", nil, func(err error) any { return err == nil })
+	if got != true {
+		t.Fatalf("want true, got %v", got)
+	}
+}

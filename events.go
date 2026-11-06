@@ -3,6 +3,7 @@ package cordis
 import (
 	"errors"
 	"fmt"
+	"reflect"
 	"sync"
 	"sync/atomic"
 )
@@ -101,11 +102,32 @@ func (c *Context) OnValue[E any](name string, fn func(E) any, opts ...EventOptio
 func (c *Context) OnWaterfall[E any](name string, fn func(E, func(E) any) any,
 	opts ...EventOption) Disposer {
 	return c.on(name, func(payload any, next func(any) any) any {
-		return fn(assertPayload[E](name, payload), func(value E) any { return next(value) })
+		return fn(assertPayload[E](name, payload), func(value E) any {
+			return next(eventPayload(value))
+		})
 	}, opts...)
 }
 
+// nilEventPayload preserves the declared interface type when boxing an event
+// would otherwise erase it. Non-nil payloads keep their normal dynamic type.
+type nilEventPayload struct{ typ reflect.Type }
+
+func eventPayload[E any](value E) any {
+	if any(value) == nil {
+		return nilEventPayload{reflect.TypeFor[E]()}
+	}
+	return value
+}
+
 func assertPayload[E any](name string, payload any) E {
+	if empty, ok := payload.(nilEventPayload); ok {
+		want := reflect.TypeFor[E]()
+		if !empty.typ.AssignableTo(want) {
+			panic(fmt.Sprintf("event %q: payload has type %v, want %v", name, empty.typ, want))
+		}
+		var zero E
+		return zero
+	}
 	value, ok := payload.(E)
 	if !ok {
 		var zero E
@@ -263,10 +285,11 @@ func (c *Context) EmitScoped[E any](scopeName, name string, payload E) {
 }
 
 func emitWith[E any](c *Context, name string, payload E, filter func(*eventListener) bool) {
+	boxed := eventPayload(payload)
 	for _, listener := range c.shared.bus.selectListeners(name, filter) {
 		// invoke reports a listener panic itself; logging the returned error
 		// here too would report the same panic twice.
-		_, _ = c.shared.bus.invoke(listener, payload)
+		_, _ = c.shared.bus.invoke(listener, boxed)
 	}
 }
 
@@ -283,8 +306,9 @@ func (c *Context) BailScoped[E any](scopeName, name string, payload E) (any, boo
 
 func bailWith[E any](c *Context, name string, payload E,
 	filter func(*eventListener) bool) (result any, bailed bool) {
+	boxed := eventPayload(payload)
 	for _, listener := range c.shared.bus.selectListeners(name, filter) {
-		value, err := c.shared.bus.invoke(listener, payload)
+		value, err := c.shared.bus.invoke(listener, boxed)
 		if err != nil {
 			// invoke already reported the panic; keep dispatching.
 			continue
@@ -320,6 +344,7 @@ func (c *Context) ParallelScoped[E any](scopeName, name string, payload E) error
 
 func parallelWith[E any](c *Context, name string, payload E,
 	filter func(*eventListener) bool) error {
+	boxed := eventPayload(payload)
 	listeners := c.shared.bus.selectListeners(name, filter)
 	var wg sync.WaitGroup
 	errs := make([]error, len(listeners))
@@ -327,7 +352,7 @@ func parallelWith[E any](c *Context, name string, payload E,
 		wg.Add(1)
 		go func(index int, listener *eventListener) {
 			defer wg.Done()
-			if _, err := c.shared.bus.invoke(listener, payload); err != nil {
+			if _, err := c.shared.bus.invoke(listener, boxed); err != nil {
 				errs[index] = err
 			}
 		}(i, listener)
@@ -362,7 +387,7 @@ func waterfallWith[E any](c *Context, name string, payload E, final func(E) any,
 			next:     tail,
 		}
 	}
-	return tail.call(payload)
+	return tail.call(eventPayload(payload))
 }
 
 // waterfallStep owns one continuation in a waterfall chain. Each listener gets
