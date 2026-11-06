@@ -711,7 +711,19 @@ func (t *Tree) Load(ctx *cordis.Context, registry *Registry) ([]*cordis.Fiber, e
 		return nil, fmt.Errorf("loader: nil registry")
 	}
 	var fibers []*cordis.Fiber
-	if err := t.loadNodes(ctx, registry, t.Nodes, nil, &fibers); err != nil {
+	err := t.loadNodes(ctx, registry, t.Nodes, nil, &fibers)
+	if err == nil {
+		// A later provider can synchronously activate an earlier pending entry.
+		// Its failure belongs to this load just like a direct startup error.
+		for _, fiber := range fibers {
+			if fiber.State() == cordis.StateFailed {
+				err = fmt.Errorf("loader: plugin %q failed during assembly: %w",
+					fiber.Name(), fiber.Error())
+				break
+			}
+		}
+	}
+	if err != nil {
 		// Configuration loading is all-or-nothing: a half-applied tree is
 		// harder to reason about than no tree at all.
 		for i := len(fibers) - 1; i >= 0; i-- {

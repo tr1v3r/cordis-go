@@ -1,6 +1,7 @@
 package loader_test
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -56,5 +57,29 @@ func TestTreeLoadRollsBackValidatePanic(t *testing.T) {
 	}
 	if got := reg.Plugins(); len(got) != 0 {
 		t.Fatalf("want no plugin with live fibers after rollback, got %v", got)
+	}
+}
+
+func TestTreeLoadRollsBackFailureTriggeredByLaterProvider(t *testing.T) {
+	root := cordis.New()
+	defer root.Fiber().Dispose()
+	registry := loader.NewRegistry()
+	failure := errors.New("start failed")
+	loader.MustRegister(registry, "client", cordis.Define("client",
+		func(*cordis.Context, int) error { return failure }).WithInject("db"))
+	loader.MustRegister(registry, "server", cordis.Define("server",
+		func(ctx *cordis.Context, _ int) error {
+			_, err := ctx.Provide("db", 1)
+			return err
+		}))
+	tree := loader.Tree{Nodes: []*loader.Node{{Name: "client"}, {Name: "server"}}}
+	before := len(root.Effects())
+	fibers, err := tree.Load(root, registry)
+	if fibers != nil || !errors.Is(err, failure) {
+		t.Fatalf("want nil fibers and startup failure, got %v and %v", fibers, err)
+	}
+	if _, ok := root.Lookup("db"); ok || len(root.Effects()) != before {
+		t.Fatalf("want absent db and %d effects, got found=%v and %d",
+			before, ok, len(root.Effects()))
 	}
 }
