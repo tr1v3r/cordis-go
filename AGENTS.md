@@ -43,6 +43,14 @@ make integration  # 跨特性集成测试：go test -race -count=3 ./...（CI �
 - **同一 definition 加载两次 = 一个 runtime、两个 fiber**：`runtime` 按 definition 指针身份索引，
   `TestSamePluginLoadedTwice` 守着这条语义。
 
+## 组件知识库
+
+`knowledge/` 是核心语义的知识库五件套（FLOW / DECISIONS / HISTORY / TODO / SCENARIOS），
+保存源码难以表达的设计意图、有效约束、失败经验与验收案例；`docs/` 的八张深潜图是行为
+事实来源，两者互引不重复。改 fiber / effect / service / events / loader 的控制流、对外行为
+或约束之前，先读 `knowledge/` 对应条目（DECISIONS 每条带重新评估条件，TODO 是背景不是
+授权清单）；改完代码后按 skill 的维护规则只更新受影响的件。引用的提交与测试名均可回查。
+
 ## 风格
 
 `.revive.toml` 是唯一权威（revive 默认规则集 + **100 列**上限）：
