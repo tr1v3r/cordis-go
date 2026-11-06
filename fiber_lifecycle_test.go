@@ -705,3 +705,26 @@ func TestSetGetConcurrent(t *testing.T) {
 	}()
 	wg.Wait()
 }
+
+func TestDisposeDrainsEffectsOfPendingFiber(t *testing.T) {
+	root := cordis.New()
+	defer root.Fiber().Dispose()
+	parent, err := cordis.Inject(root, []string{"missing"}, func(*cordis.Context) error {
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	parent.Ctx.On("tick", func(int) { calls++ })
+	child, err := cordis.Inject(parent.Ctx, nil, func(*cordis.Context) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent.Dispose()
+	root.Emit("tick", 1)
+	if child.State() != cordis.StateDisposed || calls != 0 || len(parent.Effects()) != 0 {
+		t.Fatalf("want disposed child, 0 calls and 0 effects, got %s, %d and %d",
+			child.State(), calls, len(parent.Effects()))
+	}
+}

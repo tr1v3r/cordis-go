@@ -688,22 +688,21 @@ func (f *Fiber) fail(err error) {
 // finishes through finalizeDispose, otherwise it returns to pending.
 func (f *Fiber) unload() {
 	f.mu.Lock()
-	if f.live {
-		f.live = false
-		f.mu.Unlock()
-	} else {
+	if !f.live {
 		disposed := f.disposed
 		f.mu.Unlock()
 		if disposed {
+			// A public context can own effects before its plugin has ever loaded.
+			f.drainEffects()
 			f.finalizeDispose()
 		}
 		return
 	}
+	f.live = false
+	f.mu.Unlock()
 
 	f.setState(StateUnloading)
-	for _, entry := range f.disposables.clear() {
-		f.runDisposer(entry)
-	}
+	f.drainEffects()
 	f.mu.Lock()
 	f.resolvedServices = nil
 	f.config = nil
@@ -714,6 +713,12 @@ func (f *Fiber) unload() {
 		return
 	}
 	f.setState(StatePending)
+}
+
+func (f *Fiber) drainEffects() {
+	for _, entry := range f.disposables.clear() {
+		f.runDisposer(entry)
+	}
 }
 
 // finalizeDispose drives a disposed fiber to its terminal state and releases
