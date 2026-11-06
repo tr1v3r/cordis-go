@@ -239,17 +239,17 @@ func (b *serviceBinding) reportPanic(reason any) {
 	}
 }
 
-// providedNames lists the services a fiber currently owns.
-func (c *core) providedNames(fiber *Fiber) []string {
+// providedBindings snapshots the registrations owned by a fiber, including their scopes.
+func (c *core) providedBindings(fiber *Fiber) []*serviceBinding {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	var names []string
+	var bindings []*serviceBinding
 	for _, binding := range c.serviceBindings {
 		if binding.provider == fiber {
-			names = append(names, binding.name)
+			bindings = append(bindings, binding)
 		}
 	}
-	return names
+	return bindings
 }
 
 // notify re-evaluates every fiber that requires name in the given scope.
