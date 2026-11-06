@@ -209,7 +209,8 @@ func (b *serviceBinding) available() bool {
 
 // live reports whether the binding still resolves to an active provider.
 func (b *serviceBinding) live() bool {
-	return b.provider != nil && b.provider.State() == StateActive && b.available()
+	return b.provider != nil && b.provider.State() == StateActive && b.available() &&
+		b.provider.shared().getServiceBinding(b.scopeLabel) == b
 }
 
 // runCheck invokes the availability predicate, converting a panic into
