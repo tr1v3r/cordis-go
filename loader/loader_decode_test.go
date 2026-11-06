@@ -3,6 +3,7 @@ package loader_test
 import (
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	cordis "github.com/tr1v3r/cordis-go"
@@ -241,4 +242,26 @@ func TestLoadPointerConfigStaysNilWithoutAConfigObject(t *testing.T) {
 			t.Fatalf("want a nil config for a null config, got %+v", got)
 		}
 	})
+}
+
+func TestConfigDecodeErrorOmitsOtherFields(t *testing.T) {
+	type config struct {
+		Port     int
+		Password string
+	}
+	registry := loader.NewRegistry()
+	loader.MustRegister(registry, "db", cordis.Define("db",
+		func(*cordis.Context, config) error { return nil }))
+	tree := loader.Tree{Nodes: []*loader.Node{{ID: "primary", Name: "db",
+		Config: map[string]any{"Port": "invalid", "Password": "private-value"}}}}
+	root := cordis.New()
+	defer root.Fiber().Dispose()
+	_, err := tree.Load(root, registry)
+	var fieldErr *json.UnmarshalTypeError
+	if !errors.As(err, &fieldErr) || fieldErr.Field != "Port" {
+		t.Fatalf("want decode error for Port, got %v", err)
+	}
+	if strings.Contains(err.Error(), "private-value") {
+		t.Fatal("want diagnostic to omit credentials, got password in error")
+	}
 }

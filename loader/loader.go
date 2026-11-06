@@ -693,7 +693,7 @@ func decodeConfig[C any](raw map[string]any) (C, error) {
 	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	if err := decoder.Decode(&config); err != nil {
-		return config, fmt.Errorf("loader: decode config %s: %w", string(data), err)
+		return config, fmt.Errorf("loader: decode config: %w", err)
 	}
 	return config, nil
 }
