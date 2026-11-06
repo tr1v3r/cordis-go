@@ -269,15 +269,11 @@ func (c *Context) resolveService(name string) *serviceBinding {
 	scopeLabel := c.isolateLabel(name)
 	for fiber := c.fiber; fiber != nil; {
 		fiber.mu.Lock()
-		binding := fiber.resolvedServices[name]
+		binding := fiber.resolvedServices[scopeLabel]
 		fiber.mu.Unlock()
-		// The snapshot is keyed by service name, so it can hold at most one
-		// binding per name; the scope guard keeps isolated services apart, the
-		// name guard rejects a binding another service name isolated onto this
-		// label, and the availability check hides a service while its predicate
-		// fails.
-		if binding != nil && binding.name == name && binding.scopeLabel == scopeLabel &&
-			binding.available() {
+		// A shared scope label can be addressed under another name. Only the
+		// registered name is visible, and the availability predicate still applies.
+		if binding != nil && binding.name == name && binding.available() {
 			return binding
 		}
 		parentCtx := fiber.Parent

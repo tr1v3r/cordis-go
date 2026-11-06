@@ -261,13 +261,18 @@ func (f *Fiber) Inject() []string {
 	return names
 }
 
-// Store returns the services this fiber resolved while active.
+// Store returns the services this fiber resolved while active, indexed by name.
+// For a name present in several scopes it reports the newest registration.
 func (f *Fiber) Store() map[string]any {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	services := make(map[string]any, len(f.resolvedServices))
-	for name, binding := range f.resolvedServices {
-		services[name] = binding.getService()
+	newest := make(map[string]int, len(f.resolvedServices))
+	for _, binding := range f.resolvedServices {
+		if binding.seq > newest[binding.name] {
+			newest[binding.name] = binding.seq
+			services[binding.name] = binding.getService()
+		}
 	}
 	return services
 }
@@ -567,7 +572,7 @@ func (f *Fiber) resolveInjections() (map[string]*serviceBinding, string) {
 		if binding == nil {
 			return nil, epochInactive
 		}
-		bindings[name] = binding
+		bindings[binding.scopeLabel] = binding
 		// The binding sequence matters as much as the provider: a provider that
 		// releases its registration and provides the name again keeps its UID,
 		// but a dependent pinned to the released object must still reload.

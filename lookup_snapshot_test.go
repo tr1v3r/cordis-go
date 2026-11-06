@@ -84,3 +84,33 @@ func TestPinnedBindingStillHonorsAvailabilityCheck(t *testing.T) {
 		t.Fatal("want the pinned binding to resolve once the check passes")
 	}
 }
+
+func TestProviderReadsOwnBindingsAcrossScopesDuringApply(t *testing.T) {
+	root := cordis.New()
+	defer root.Fiber().Dispose()
+	_, err := cordis.Inject(root, nil, func(ctx *cordis.Context) error {
+		first, second := ctx.Isolate("db"), ctx.Isolate("db")
+		_, err := first.Provide("db", 1)
+		if err != nil {
+			return err
+		}
+		release, err := second.Provide("db", 2)
+		if err != nil {
+			return err
+		}
+		if got, ok := first.Get[int]("db"); !ok || got != 1 {
+			t.Errorf("want first db 1, got %d (found %v)", got, ok)
+		}
+		if got := ctx.Fiber().Store()["db"]; got != 2 {
+			t.Errorf("want newest db 2, got %v", got)
+		}
+		release()
+		if got, ok := first.Get[int]("db"); !ok || got != 1 {
+			t.Errorf("want surviving db 1, got %d (found %v)", got, ok)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
