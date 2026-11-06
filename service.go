@@ -82,7 +82,7 @@ func provide(c *Context, name string, service any,
 			// yet; their snapshot is built when they load.
 			ownerFiber.mu.Lock()
 			if ownerFiber.resolvedServices != nil {
-				ownerFiber.resolvedServices[name] = binding
+				ownerFiber.resolvedServices[scopeLabel] = binding
 			}
 			ownerFiber.mu.Unlock()
 
@@ -94,7 +94,9 @@ func provide(c *Context, name string, service any,
 				c.shared.unregisterService(binding)
 				c.shared.notify(name, scopeLabel)
 				ownerFiber.mu.Lock()
-				delete(ownerFiber.resolvedServices, name)
+				if ownerFiber.resolvedServices[scopeLabel] == binding {
+					delete(ownerFiber.resolvedServices, scopeLabel)
+				}
 				ownerFiber.mu.Unlock()
 			}
 		})
