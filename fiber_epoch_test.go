@@ -150,3 +150,29 @@ func TestTransientUnavailabilityDuringReloadDoesNotWedgeFiber(t *testing.T) {
 		t.Fatalf("want one effect after the reload, got %d", got)
 	}
 }
+
+func TestConsumerSkipsBindingReleasedBeforeActivation(t *testing.T) {
+	root := cordis.New()
+	defer root.Fiber().Dispose()
+	release, err := root.Provide("db", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root.On("internal/status", func(ev *cordis.StatusEvent) {
+		if ev.Fiber.Name() == "client" && ev.Fiber.State() == cordis.StateLoading {
+			release()
+		}
+	})
+	calls := 0
+	client := cordis.Define("client", func(*cordis.Context, int) error {
+		calls++
+		return nil
+	}).WithInject("db")
+	fiber, err := root.Load(client, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 0 || fiber.State() != cordis.StatePending {
+		t.Fatalf("want 0 calls and pending, got %d and %s", calls, fiber.State())
+	}
+}
