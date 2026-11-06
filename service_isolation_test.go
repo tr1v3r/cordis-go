@@ -165,3 +165,29 @@ func TestInjectResolvesOwnerNameOnSharedLabel(t *testing.T) {
 		t.Fatalf("want %v, got %v", database, got)
 	}
 }
+
+func TestProviderActivationNotifiesRegistrationScope(t *testing.T) {
+	root := cordis.New()
+	defer root.Fiber().Dispose()
+	tenant := root.IsolateShared("db", "tenant")
+	consumer, err := cordis.Inject(tenant, []string{"db"}, func(*cordis.Context) error {
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider, err := cordis.Inject(root, nil, func(ctx *cordis.Context) error {
+		_, err := ctx.IsolateShared("db", "tenant").Provide("db", 1)
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := consumer.State(); got != cordis.StateActive {
+		t.Fatalf("want active, got %s", got)
+	}
+	provider.Dispose()
+	if got := consumer.State(); got != cordis.StatePending {
+		t.Fatalf("want pending, got %s", got)
+	}
+}

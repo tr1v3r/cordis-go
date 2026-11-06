@@ -756,8 +756,8 @@ func (f *Fiber) setState(state FiberState) bool {
 // notifyProvided re-evaluates every fiber that injects a service this fiber
 // owns, which is what makes dependency replacement propagate.
 func (f *Fiber) notifyProvided() {
-	for _, name := range f.shared().providedNames(f) {
-		f.shared().notify(name, f.Ctx.isolateLabel(name))
+	for _, binding := range f.shared().providedBindings(f) {
+		f.shared().notify(binding.name, binding.scopeLabel)
 	}
 }
 
