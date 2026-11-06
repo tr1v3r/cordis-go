@@ -47,8 +47,8 @@ make integration  # 跨特性集成测试：go test -race -count=3 ./...（CI �
 
 `.revive.toml` 是唯一权威（revive 默认规则集 + **100 列**上限）：
 
-- Go 源码的注释与输出**一律英文**；`README.md` 是唯一面向使用者的中文文档，本文件 `AGENTS.md`
-  （以及指向它的 `CLAUDE.md`）是面向编码代理的中文指南。
+- Go 源码的注释与输出**一律英文**。`README.md` 是中文使用指南，`docs/` 收录中文架构图与工作流说明。
+  本文件 `AGENTS.md`（以及指向它的 `CLAUDE.md`）是面向编码代理的中文指南。
 - 导出符号要有文档注释，以符号名开头、以句号结尾；非导出函数按需写，别为凑格式补噪音。
 - 测试失败信息统一 `want X, got Y`。
 - 提交信息用 Conventional Commits，正文讲**为什么**；破坏性变更加 `!` 并写 `BREAKING CHANGE:`。
