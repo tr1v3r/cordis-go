@@ -120,7 +120,7 @@ examples:
 
 # Install the lint tools at the versions this repository is verified against.
 tools:
-	$(GO) install honnef.co/go/tools/cmd/staticcheck@v0.8.1
+	$(GO) install honnef.co/go/tools/cmd/staticcheck@v0.8.2
 	$(GO) install github.com/mgechev/revive@v1.16.0
 
 ci: lint test benchsmoke
